@@ -35,7 +35,7 @@ echo.
 
 echo [4/4] Creating GitHub Release using GitHub CLI (gh)...
 REM Assuming you have 'gh' installed and authenticated (gh auth login)
-gh release create "%VERSION%" "src-tauri\target\release\bundle\msi\*.msi" -t "%VERSION%" -n "Automated Release %VERSION%"
+gh release create "%VERSION%" "src-tauri\target\release\bundle\msi\*.msi" -t "%VERSION%" -F CHANGELOG.md
 echo.
 
 echo Release Complete! Check your GitHub Repository.
