@@ -15,6 +15,7 @@ if "%SUFFIX%"=="" (
 )
 set SKIP_VERSION_UPDATE=1
 for /f "tokens=*" %%a in ('node -p "require('./src/version.json').version"') do set VERSION=%%a
+set TAG_NAME=%VERSION: =-%
 echo New Version: %VERSION%
 echo.
 
@@ -35,7 +36,7 @@ echo.
 
 echo [4/4] Creating GitHub Release using GitHub CLI (gh)...
 REM Assuming you have 'gh' installed and authenticated (gh auth login)
-gh release create "%VERSION%" "src-tauri\target\release\bundle\msi\*.msi" -t "%VERSION%" -F CHANGELOG.md
+gh release create "%TAG_NAME%" "src-tauri\target\release\bundle\msi\*.msi" -t "%VERSION%" -F CHANGELOG.md
 echo.
 
 echo Release Complete! Check your GitHub Repository.
