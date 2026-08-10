@@ -31,6 +31,17 @@ pub struct JobRequest {
     pub output_path: String,
     pub video_codec: String, // e.g., "libx264", "hevc_nvenc"
     pub crf: u8,
+    pub video_resolution: String,
+    pub custom_width: String,
+    pub custom_height: String,
+    pub maintain_aspect_ratio: bool,
+    pub video_fps: String,
+    pub custom_fps: String,
+    pub fps_mode: String,
+    pub pixel_format: String,
+    pub deinterlace: String,
+    pub denoise: String,
+    pub sharpen: String,
     pub audio_tracks: Vec<AudioTrackConfig>,
 }
 
@@ -77,6 +88,84 @@ fn start_job(app: AppHandle, request: JobRequest) -> Result<(), String> {
         args.push("-c:v".to_string());
         args.push(request.video_codec.clone());
         if request.video_codec != "copy" {
+            // Pixel format
+            if request.pixel_format != "auto" {
+                args.push("-pix_fmt".to_string());
+                args.push(request.pixel_format.clone());
+            }
+
+            // Framerate
+            let target_fps = if request.video_fps == "Custom" && !request.custom_fps.is_empty() {
+                request.custom_fps.clone()
+            } else if request.video_fps != "Original" {
+                request.video_fps.clone()
+            } else {
+                "".to_string()
+            };
+            
+            let mut vfilters = Vec::new();
+
+            if !target_fps.is_empty() {
+                if request.fps_mode == "interpolate" {
+                    vfilters.push(format!("minterpolate=fps={}", target_fps));
+                } else {
+                    args.push("-r".to_string());
+                    args.push(target_fps);
+                }
+            }
+            
+            // Deinterlace
+            match request.deinterlace.as_str() {
+                "bwdif" => vfilters.push("bwdif=mode=0".to_string()),
+                "bwdif_bob" => vfilters.push("bwdif=mode=1".to_string()),
+                "yadif" => vfilters.push("yadif".to_string()),
+                _ => {}
+            }
+
+            // Denoise (hqdn3d gives good results for standard use)
+            match request.denoise.as_str() {
+                "light" => vfilters.push("hqdn3d=1.5:1.5:6:6".to_string()),
+                "medium" => vfilters.push("hqdn3d=3.0:3.0:6:6".to_string()),
+                "strong" => vfilters.push("hqdn3d=5.0:5.0:6:6".to_string()),
+                _ => {}
+            }
+
+            // Sharpen (unsharp mask)
+            match request.sharpen.as_str() {
+                "light" => vfilters.push("unsharp=5:5:0.5:5:5:0.0".to_string()),
+                "medium" => vfilters.push("unsharp=5:5:1.0:5:5:0.0".to_string()),
+                "strong" => vfilters.push("unsharp=5:5:1.5:5:5:0.0".to_string()),
+                _ => {}
+            }
+
+            // Resolution
+            if request.video_resolution != "Original" {
+                let mut w = "-2".to_string();
+                let mut h = "-2".to_string();
+
+                if request.video_resolution == "Custom" {
+                    w = if request.custom_width.is_empty() { "-2".to_string() } else { request.custom_width.clone() };
+                    h = if request.custom_height.is_empty() { "-2".to_string() } else { request.custom_height.clone() };
+                } else {
+                    h = request.video_resolution.clone();
+                }
+
+                if w != "-2" || h != "-2" {
+                    if request.maintain_aspect_ratio {
+                        vfilters.push(format!("scale={}:{}", w, h));
+                    } else {
+                        let exact_w = if w == "-2" { "iw".to_string() } else { w };
+                        let exact_h = if h == "-2" { "ih".to_string() } else { h };
+                        vfilters.push(format!("scale={}:{}", exact_w, exact_h));
+                    }
+                }
+            }
+
+            if !vfilters.is_empty() {
+                args.push("-vf".to_string());
+                args.push(vfilters.join(","));
+            }
+
             // Different encoders use different arguments for constant quality
             if request.video_codec.contains("nvenc") {
                 args.push("-cq".to_string());

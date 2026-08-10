@@ -17,6 +17,21 @@ function App() {
   const [crf, setCrf] = useState(22);
   const [audioConfigs, setAudioConfigs] = useState<any[]>([]);
 
+  // Video Advanced State
+  const [videoResolution, setVideoResolution] = useState("Original");
+  const [customWidth, setCustomWidth] = useState("");
+  const [customHeight, setCustomHeight] = useState("");
+  const [maintainAspectRatio, setMaintainAspectRatio] = useState(true);
+  
+  const [videoFps, setVideoFps] = useState("Original");
+  const [customFps, setCustomFps] = useState("");
+  const [fpsMode, setFpsMode] = useState("standard");
+  
+  const [pixelFormat, setPixelFormat] = useState("auto");
+  const [deinterlace, setDeinterlace] = useState("off");
+  const [denoise, setDenoise] = useState("off");
+  const [sharpen, setSharpen] = useState("off");
+
   useEffect(() => {
     invoke<string[]>("get_encoders").then(encs => {
       setEncoders(encs);
@@ -133,6 +148,17 @@ function App() {
         output_path: outputPath,
         video_codec: videoCodec,
         crf: Number(crf),
+        video_resolution: videoResolution,
+        custom_width: customWidth,
+        custom_height: customHeight,
+        maintain_aspect_ratio: maintainAspectRatio,
+        video_fps: videoFps,
+        custom_fps: customFps,
+        fps_mode: fpsMode,
+        pixel_format: pixelFormat,
+        deinterlace: deinterlace,
+        denoise: denoise,
+        sharpen: sharpen,
         audio_tracks: audioConfigs.filter(c => c.enabled).map(c => ({
           input_index: c.input_index,
           title: c.title,
@@ -425,44 +451,146 @@ function App() {
                       </div>
                     </div>
                   )}
+                  <div className="settings-card" style={{ marginBottom: '1rem' }}>
+                    <h4>Dimensions & Framerate</h4>
+                    <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem' }}>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem' }}>Resolution</label>
+                        <select className="input-field" value={videoResolution} onChange={(e) => setVideoResolution(e.target.value)}>
+                          <option value="Original">Original</option>
+                          <option value="2160">2160p (4K)</option>
+                          <option value="1440">1440p (2K)</option>
+                          <option value="1080">1080p (FHD)</option>
+                          <option value="720">720p (HD)</option>
+                          <option value="480">480p (SD)</option>
+                          <option value="Custom">Custom</option>
+                        </select>
+                      </div>
+                      <div style={{ flex: 1, opacity: videoResolution === 'Custom' ? 1 : 0.5, pointerEvents: videoResolution === 'Custom' ? 'auto' : 'none' }}>
+                        <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem' }}>Width x Height</label>
+                        <div style={{ display: 'flex', gap: '0.25rem', alignItems: 'center' }}>
+                          <input type="number" className="input-field" placeholder="W" value={customWidth} onChange={(e) => setCustomWidth(e.target.value)} />
+                          <span>x</span>
+                          <input type="number" className="input-field" placeholder="H" value={customHeight} onChange={(e) => setCustomHeight(e.target.value)} />
+                        </div>
+                      </div>
+                    </div>
+                    {videoResolution !== 'Original' && (
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.5rem', cursor: 'pointer' }}>
+                        <input type="checkbox" checked={maintainAspectRatio} onChange={(e) => setMaintainAspectRatio(e.target.checked)} />
+                        <span style={{ fontSize: '0.875rem' }}>Maintain Aspect Ratio (Proportional Width)</span>
+                      </label>
+                    )}
+
+                    <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem' }}>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem' }}>Framerate (FPS)</label>
+                        <select className="input-field" value={videoFps} onChange={(e) => setVideoFps(e.target.value)}>
+                          <option value="Original">Original</option>
+                          <option value="23.976">23.976 (Film)</option>
+                          <option value="24">24</option>
+                          <option value="25">25 (PAL)</option>
+                          <option value="29.97">29.97 (NTSC)</option>
+                          <option value="30">30</option>
+                          <option value="59.94">59.94</option>
+                          <option value="60">60</option>
+                          <option value="Custom">Custom</option>
+                        </select>
+                        {videoFps === 'Custom' && (
+                          <input type="number" className="input-field" placeholder="Custom FPS" value={customFps} onChange={(e) => setCustomFps(e.target.value)} style={{ marginTop: '0.5rem' }} />
+                        )}
+                      </div>
+                      <div style={{ flex: 1, opacity: videoFps === 'Original' ? 0.5 : 1, pointerEvents: videoFps === 'Original' ? 'none' : 'auto' }}>
+                        <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem' }} title="Motion Interpolation takes longer but generates artificial frames for a smoother upframe experience.">Mode</label>
+                        <select className="input-field" value={fpsMode} onChange={(e) => setFpsMode(e.target.value)}>
+                          <option value="standard">Standard (Drop/Duplicate)</option>
+                          <option value="interpolate">Motion Interpolation (Blend)</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="settings-card" style={{ marginBottom: '1rem' }}>
+                    <h4>Video Filters</h4>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem', marginTop: '1rem' }}>
+                      <div>
+                        <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem' }}>Deinterlace</label>
+                        <select className="input-field" value={deinterlace} onChange={(e) => setDeinterlace(e.target.value)}>
+                          <option value="off">Off</option>
+                          <option value="bwdif">Default (BWDIF)</option>
+                          <option value="yadif">YADIF</option>
+                          <option value="bwdif_bob">Bob (Double Framerate)</option>
+                        </select>
+                      </div>
+                      <div style={{ display: 'flex', gap: '1rem' }}>
+                        <div style={{ flex: 1 }}>
+                          <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem' }}>Denoise (NLMeans / HQDN3D)</label>
+                          <select className="input-field" value={denoise} onChange={(e) => setDenoise(e.target.value)}>
+                            <option value="off">Off</option>
+                            <option value="light">Light</option>
+                            <option value="medium">Medium</option>
+                            <option value="strong">Strong</option>
+                          </select>
+                        </div>
+                        <div style={{ flex: 1 }}>
+                          <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem' }}>Sharpen (Unsharp)</label>
+                          <select className="input-field" value={sharpen} onChange={(e) => setSharpen(e.target.value)}>
+                            <option value="off">Off</option>
+                            <option value="light">Light</option>
+                            <option value="medium">Medium</option>
+                            <option value="strong">Strong</option>
+                          </select>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
                   <div className="settings-card">
                     <h4>Video Encoding</h4>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem' }}>
-                        <div>
-                      <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem' }}>Codec & HW Accel</label>
-                      <select 
-                        className="input-field"
-                        value={videoCodec}
-                        onChange={(e) => setVideoCodec(e.target.value)}
-                      >
-                        <option value="libx264">H.264 (Software)</option>
-                        <option value="libx265">H.265 / HEVC (Software)</option>
-                        <option value="libaom-av1">AV1 (Software)</option>
-                        <option disabled>--- Hardware Encoders ---</option>
-                        {encoders.map(e => {
-                           if (e.includes("NVENC")) return <><option value="h264_nvenc">H.264 (NVENC)</option><option value="hevc_nvenc">H.265 (NVENC)</option></>;
-                           if (e.includes("QSV")) return <><option value="h264_qsv">H.264 (QSV)</option><option value="hevc_qsv">H.265 (QSV)</option></>;
-                           if (e.includes("AMF")) return <><option value="h264_amf">H.264 (AMF)</option><option value="hevc_amf">H.265 (AMF)</option></>;
-                           return null;
-                        })}
-                        <option value="copy">Pass-through (Copy Video)</option>
-                      </select>
+                    <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem' }}>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem' }}>Codec & HW Accel</label>
+                        <select 
+                          className="input-field"
+                          value={videoCodec}
+                          onChange={(e) => setVideoCodec(e.target.value)}
+                        >
+                          <option value="libx264">H.264 (Software)</option>
+                          <option value="libx265">H.265 / HEVC (Software)</option>
+                          <option value="libaom-av1">AV1 (Software)</option>
+                          <option disabled>--- Hardware Encoders ---</option>
+                          {encoders.map(e => {
+                             if (e.includes("NVENC")) return <><option value="h264_nvenc">H.264 (NVENC)</option><option value="hevc_nvenc">H.265 (NVENC)</option></>;
+                             if (e.includes("QSV")) return <><option value="h264_qsv">H.264 (QSV)</option><option value="hevc_qsv">H.265 (QSV)</option></>;
+                             if (e.includes("AMF")) return <><option value="h264_amf">H.264 (AMF)</option><option value="hevc_amf">H.265 (AMF)</option></>;
+                             return null;
+                          })}
+                          <option value="copy">Pass-through (Copy Video)</option>
+                        </select>
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem' }} title="Fixes H.264 10-bit encoder crashes by explicitly converting to 8-bit SDR.">Pixel Format</label>
+                        <select className="input-field" value={pixelFormat} onChange={(e) => setPixelFormat(e.target.value)} disabled={videoCodec === 'copy'}>
+                          <option value="auto">Auto (Copy Source)</option>
+                          <option value="yuv420p">8-bit (SDR / H.264 Compatible)</option>
+                          <option value="yuv420p10le">10-bit (HDR / HEVC Recommended)</option>
+                        </select>
+                      </div>
                     </div>
                     {videoCodec !== 'copy' && (
-                      <div>
-                        <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem' }}>Quality (CRF: {crf})</label>
+                      <div style={{ marginTop: '1rem' }}>
+                        <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem' }}>Quality (Target Level: {crf})</label>
                         <input 
                           type="range" min="0" max="51" 
                           value={crf} 
                           onChange={(e) => setCrf(Number(e.target.value))}
                           style={{ width: '100%' }} 
                         />
-                        <div style={{ textAlign: 'center', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>Lower is better quality. Default: 22</div>
+                        <div style={{ textAlign: 'center', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>Lower is better quality. (CRF/CQ Scale). Default: 22</div>
                       </div>
                     )}
-                </div>
-              </div>
-            </>
+                  </div>
+                </>
             );
             })()}
           </div>
