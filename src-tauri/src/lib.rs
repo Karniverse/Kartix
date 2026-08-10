@@ -1,15 +1,18 @@
 use std::process::{Command, Stdio};
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader};
-use tauri::{AppHandle, Emitter};
+use std::io::{BufRead, BufReader, Read};
+use tauri::{AppHandle, Emitter, Manager};
 use std::sync::{Arc, Mutex};
 use std::thread;
+
+struct JobState(Mutex<Option<u32>>);
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MediaInfo {
     pub file_path: String,
     pub format: serde_json::Value,
     pub streams: serde_json::Value,
+    pub chapters: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -26,11 +29,29 @@ pub struct AudioTrackConfig {
 }
 
 #[derive(Deserialize, Debug)]
+pub struct SubtitleTrackConfig {
+    pub input_index: usize,
+    pub title: String,
+    pub action: String, // "copy", "burn", "none"
+    pub language: String,
+    pub is_default: bool,
+    pub is_forced: bool,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct ChapterConfig {
+    pub start_time: f64,
+    pub end_time: f64,
+    pub title: String,
+}
+
+#[derive(Deserialize, Debug)]
 pub struct JobRequest {
     pub input_path: String,
     pub output_path: String,
     pub video_codec: String, // e.g., "libx264", "hevc_nvenc"
     pub crf: u8,
+    pub video_bitrate: String, // e.g., "5000k"
     pub video_resolution: String,
     pub custom_width: String,
     pub custom_height: String,
@@ -43,6 +64,10 @@ pub struct JobRequest {
     pub denoise: String,
     pub sharpen: String,
     pub audio_tracks: Vec<AudioTrackConfig>,
+    pub subtitle_tracks: Vec<SubtitleTrackConfig>,
+    pub keep_chapters: bool,
+    pub custom_chapters: Vec<ChapterConfig>,
+    pub cover_art_tracks: Vec<usize>,
 }
 
 #[tauri::command]
@@ -53,6 +78,7 @@ async fn analyze_file(file_path: String) -> Result<MediaInfo, String> {
             "-print_format", "json",
             "-show_format",
             "-show_streams",
+            "-show_chapters",
             &file_path,
         ])
         .output()
@@ -64,13 +90,18 @@ async fn analyze_file(file_path: String) -> Result<MediaInfo, String> {
     }
 
     let json_str = String::from_utf8_lossy(&output.stdout);
-    let mut parsed: serde_json::Value = serde_json::from_str(&json_str)
+    let json: serde_json::Value = serde_json::from_str(&json_str)
         .map_err(|e| format!("Failed to parse ffprobe output: {}", e))?;
+
+    let format = json.get("format").cloned().unwrap_or(serde_json::json!({}));
+    let streams = json.get("streams").cloned().unwrap_or(serde_json::json!([]));
+    let chapters = json.get("chapters").cloned();
 
     Ok(MediaInfo {
         file_path,
-        format: parsed["format"].take(),
-        streams: parsed["streams"].take(),
+        format,
+        streams,
+        chapters,
     })
 }
 
@@ -105,16 +136,7 @@ fn start_job(app: AppHandle, request: JobRequest) -> Result<(), String> {
             
             let mut vfilters = Vec::new();
 
-            if !target_fps.is_empty() {
-                if request.fps_mode == "interpolate" {
-                    vfilters.push(format!("minterpolate=fps={}", target_fps));
-                } else {
-                    args.push("-r".to_string());
-                    args.push(target_fps);
-                }
-            }
-            
-            // Deinterlace
+            // 1. Deinterlace (Must happen before scaling to preserve fields)
             match request.deinterlace.as_str() {
                 "bwdif" => vfilters.push("bwdif=mode=0".to_string()),
                 "bwdif_bob" => vfilters.push("bwdif=mode=1".to_string()),
@@ -122,23 +144,7 @@ fn start_job(app: AppHandle, request: JobRequest) -> Result<(), String> {
                 _ => {}
             }
 
-            // Denoise (hqdn3d gives good results for standard use)
-            match request.denoise.as_str() {
-                "light" => vfilters.push("hqdn3d=1.5:1.5:6:6".to_string()),
-                "medium" => vfilters.push("hqdn3d=3.0:3.0:6:6".to_string()),
-                "strong" => vfilters.push("hqdn3d=5.0:5.0:6:6".to_string()),
-                _ => {}
-            }
-
-            // Sharpen (unsharp mask)
-            match request.sharpen.as_str() {
-                "light" => vfilters.push("unsharp=5:5:0.5:5:5:0.0".to_string()),
-                "medium" => vfilters.push("unsharp=5:5:1.0:5:5:0.0".to_string()),
-                "strong" => vfilters.push("unsharp=5:5:1.5:5:5:0.0".to_string()),
-                _ => {}
-            }
-
-            // Resolution
+            // 2. Resolution Scaling (Do this early to save massive CPU on subsequent filters)
             if request.video_resolution != "Original" {
                 let mut w = "-2".to_string();
                 let mut h = "-2".to_string();
@@ -161,26 +167,68 @@ fn start_job(app: AppHandle, request: JobRequest) -> Result<(), String> {
                 }
             }
 
+            // 3. Denoise
+            match request.denoise.as_str() {
+                "light" => vfilters.push("hqdn3d=1.5:1.5:6:6".to_string()),
+                "medium" => vfilters.push("hqdn3d=3.0:3.0:6:6".to_string()),
+                "strong" => vfilters.push("hqdn3d=5.0:5.0:6:6".to_string()),
+                _ => {}
+            }
+
+            // 4. Sharpen
+            match request.sharpen.as_str() {
+                "light" => vfilters.push("unsharp=5:5:0.5:5:5:0.0".to_string()),
+                "medium" => vfilters.push("unsharp=5:5:1.0:5:5:0.0".to_string()),
+                "strong" => vfilters.push("unsharp=5:5:1.5:5:5:0.0".to_string()),
+                _ => {}
+            }
+
+            // 4. Subtitle Burn-In (must be done before framerate manipulation if possible, or after)
+            for sub in &request.subtitle_tracks {
+                if sub.action == "burn" {
+                    // Burn-in subtitle requires escaping the file path, but for simplicity we pass it directly
+                    // Note: This requires the subtitle filter to have access to the file.
+                    // A safe way for Windows paths in ffmpeg filters: replace \ with / and escape colons
+                    let safe_path = request.input_path.replace("\\", "/").replace(":", "\\:");
+                    vfilters.push(format!("subtitles='{}':si={}", safe_path, sub.input_index));
+                }
+            }
+
+            // 5. Framerate / Interpolation (Most expensive, do this absolutely last on the scaled resolution)
+            if !target_fps.is_empty() {
+                if request.fps_mode == "interpolate" {
+                    vfilters.push(format!("minterpolate=fps={}", target_fps));
+                } else {
+                    args.push("-r".to_string());
+                    args.push(target_fps);
+                }
+            }
+
             if !vfilters.is_empty() {
                 args.push("-vf".to_string());
                 args.push(vfilters.join(","));
             }
 
             // Different encoders use different arguments for constant quality
-            if request.video_codec.contains("nvenc") {
-                args.push("-cq".to_string());
-                args.push(request.crf.to_string());
-            } else if request.video_codec.contains("qsv") {
-                args.push("-global_quality".to_string());
-                args.push(request.crf.to_string());
-            } else if request.video_codec.contains("amf") {
-                args.push("-qp_i".to_string());
-                args.push(request.crf.to_string());
-                args.push("-qp_p".to_string());
-                args.push(request.crf.to_string());
+            if !request.video_bitrate.is_empty() {
+                args.push("-b:v".to_string());
+                args.push(request.video_bitrate.clone());
             } else {
-                args.push("-crf".to_string());
-                args.push(request.crf.to_string());
+                if request.video_codec.contains("nvenc") {
+                    args.push("-cq".to_string());
+                    args.push(request.crf.to_string());
+                } else if request.video_codec.contains("qsv") {
+                    args.push("-global_quality".to_string());
+                    args.push(request.crf.to_string());
+                } else if request.video_codec.contains("amf") {
+                    args.push("-qp_i".to_string());
+                    args.push(request.crf.to_string());
+                    args.push("-qp_p".to_string());
+                    args.push(request.crf.to_string());
+                } else {
+                    args.push("-crf".to_string());
+                    args.push(request.crf.to_string());
+                }
             }
         }
 
@@ -262,6 +310,80 @@ fn start_job(app: AppHandle, request: JobRequest) -> Result<(), String> {
             }
         }
 
+        // Process subtitle tracks
+        let mut sub_out_idx = 0;
+        for sub in request.subtitle_tracks.iter() {
+            if sub.action == "copy" {
+                args.push("-map".to_string());
+                args.push(format!("0:{}", sub.input_index));
+
+                args.push(format!("-c:s:{}", sub_out_idx));
+                args.push("copy".to_string());
+
+                if !sub.title.is_empty() {
+                    args.push(format!("-metadata:s:s:{}", sub_out_idx));
+                    args.push(format!("title={}", sub.title));
+                }
+
+                if !sub.language.is_empty() {
+                    args.push(format!("-metadata:s:s:{}", sub_out_idx));
+                    args.push(format!("language={}", sub.language));
+                }
+
+                let mut disposition = Vec::new();
+                if sub.is_default { disposition.push("default"); }
+                if sub.is_forced { disposition.push("forced"); }
+                
+                if !disposition.is_empty() {
+                    args.push(format!("-disposition:s:{}", sub_out_idx));
+                    args.push(disposition.join("+"));
+                } else {
+                    // Explicitly remove default flag if not set
+                    args.push(format!("-disposition:s:{}", sub_out_idx));
+                    args.push("0".to_string());
+                }
+                
+                sub_out_idx += 1;
+            }
+        }
+
+        // Chapters
+        if !request.keep_chapters && request.custom_chapters.is_empty() {
+            args.push("-map_chapters".to_string());
+            args.push("-1".to_string());
+        } else if !request.custom_chapters.is_empty() {
+            // Write FFMETADATA file for custom chapters
+            let meta_path = format!("{}.metadata.txt", request.output_path);
+            let mut meta_content = String::from(";FFMETADATA1\n");
+            
+            for chap in &request.custom_chapters {
+                meta_content.push_str("[CHAPTER]\n");
+                meta_content.push_str("TIMEBASE=1/1000\n");
+                meta_content.push_str(&format!("START={}\n", (chap.start_time * 1000.0) as i64));
+                meta_content.push_str(&format!("END={}\n", (chap.end_time * 1000.0) as i64));
+                meta_content.push_str(&format!("title={}\n", chap.title));
+            }
+            
+            if std::fs::write(&meta_path, meta_content).is_ok() {
+                args.push("-i".to_string());
+                args.push(meta_path.clone());
+                args.push("-map_metadata".to_string());
+                args.push("1".to_string());
+            }
+        }
+
+        // Cover Art / Attachments
+        let mut cover_idx_counter = 1; // Since 0 is usually main video
+        for stream_idx in request.cover_art_tracks {
+            args.push("-map".to_string());
+            args.push(format!("0:{}", stream_idx));
+            args.push(format!("-c:v:{}", cover_idx_counter));
+            args.push("copy".to_string());
+            args.push(format!("-disposition:v:{}", cover_idx_counter));
+            args.push("attached_pic".to_string());
+            cover_idx_counter += 1;
+        }
+
         args.push(request.output_path.clone());
 
         println!("Running ffmpeg with args: {:?}", args);
@@ -278,24 +400,58 @@ fn start_job(app: AppHandle, request: JobRequest) -> Result<(), String> {
             }
         };
 
-        if let Some(stderr) = child.stderr.take() {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    // Just emit the raw line for now, frontend can parse time/frame
-                    let _ = app.emit("job-progress", line);
+        let pid = child.id();
+        let state = app.state::<JobState>();
+        *state.0.lock().unwrap() = Some(pid);
+
+        if let Some(mut stderr) = child.stderr.take() {
+            let mut buffer = [0; 1024];
+            let mut line_buf = String::new();
+            while let Ok(n) = stderr.read(&mut buffer) {
+                if n == 0 { break; }
+                let s = String::from_utf8_lossy(&buffer[..n]);
+                for c in s.chars() {
+                    if c == '\r' || c == '\n' {
+                        if !line_buf.is_empty() {
+                            let _ = app.emit("job-progress", line_buf.clone());
+                            line_buf.clear();
+                        }
+                    } else {
+                        line_buf.push(c);
+                    }
                 }
+            }
+            if !line_buf.is_empty() {
+                let _ = app.emit("job-progress", line_buf);
             }
         }
 
         let status = child.wait().unwrap();
+        
+        let state = app.state::<JobState>();
+        *state.0.lock().unwrap() = None;
+
         if status.success() {
             let _ = app.emit("job-success", request.output_path);
         } else {
-            let _ = app.emit("job-error", "FFmpeg job failed".to_string());
+            // It could be cancelled or failed.
+            let _ = app.emit("job-error", "FFmpeg job failed or was cancelled".to_string());
         }
     });
 
+    Ok(())
+}
+
+#[tauri::command]
+fn cancel_job(state: tauri::State<JobState>) -> Result<(), String> {
+    if let Some(pid) = *state.0.lock().unwrap() {
+        #[cfg(target_os = "windows")]
+        let _ = Command::new("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).status();
+        #[cfg(not(target_os = "windows"))]
+        let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+        
+        *state.0.lock().unwrap() = None;
+    }
     Ok(())
 }
 
@@ -336,7 +492,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![analyze_file, start_job, get_encoders, check_file_exists])
+        .manage(JobState(Mutex::new(None)))
+        .invoke_handler(tauri::generate_handler![analyze_file, start_job, get_encoders, check_file_exists, cancel_job])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
