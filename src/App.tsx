@@ -10,6 +10,7 @@ function App() {
   const [mediaInfo, setMediaInfo] = useState<any>(null);
   const [encoders, setEncoders] = useState<string[]>([]);
   const [jobStatus, setJobStatus] = useState<string>("No active jobs.");
+  const [outputPath, setOutputPath] = useState<string>("");
   
   // Settings State
   const [videoCodec, setVideoCodec] = useState("libx264");
@@ -17,7 +18,12 @@ function App() {
   const [audioConfigs, setAudioConfigs] = useState<any[]>([]);
 
   useEffect(() => {
-    invoke<string[]>("get_encoders").then(setEncoders).catch(console.error);
+    invoke<string[]>("get_encoders").then(encs => {
+      setEncoders(encs);
+      if (encs.some(e => e.includes("NVENC"))) setVideoCodec("h264_nvenc");
+      else if (encs.some(e => e.includes("QSV"))) setVideoCodec("h264_qsv");
+      else if (encs.some(e => e.includes("AMF"))) setVideoCodec("h264_amf");
+    }).catch(console.error);
 
     const unlistenSuccess = listen("job-success", (event) => {
       setJobStatus(`Job Completed successfully! Saved to: ${event.payload}`);
@@ -61,18 +67,45 @@ function App() {
         setMediaInfo(info);
         setJobStatus("File loaded.");
         
+        // Set default output path
+        const isWin = selected.includes('\\');
+        const pathParts = selected.split(isWin ? '\\' : '/');
+        const fileName = pathParts.pop() || "output";
+        const dir = pathParts.join(isWin ? '\\' : '/');
+        const extMatch = fileName.match(/\.[^.]+$/);
+        const ext = extMatch ? extMatch[0] : ".mkv";
+        const baseName = fileName.replace(ext, "");
+        setOutputPath(`${dir}${isWin ? '\\' : '/'}${baseName} - converted.mkv`);
+
         // Initialize audio configs based on streams
         if (info && (info as any).streams) {
           const aConfigs = ((info as any).streams as any[])
             .filter((s: any) => s.codec_type === 'audio')
-            .map((s: any) => ({
-              input_index: s.index,
-              action: s.channels === 6 ? "discrete_51" : "copy",
-              codec: "aac",
-              normalize: false,
-              _channels: s.channels,
-              _title: s.tags?.title || s.tags?.language || `Track ${s.index}`
-            }));
+            .map((s: any) => {
+              const lang = s.tags?.language ? s.tags.language.toUpperCase() : "UND";
+              const isCopy = s.channels === 6;
+              const outCodec = isCopy ? (s.codec_name ? s.codec_name.toUpperCase() : "UNKNOWN") : "AAC";
+              const outCh = isCopy ? "5.1" : (s.channels === 2 ? "5.1" : s.channels);
+              const layout = outCh === "5.1" ? "Surround" : s.channels === 2 ? "Stereo" : `${s.channels}ch`;
+              
+              return {
+                input_index: s.index,
+                action: isCopy ? "copy" : s.channels === 2 ? "upmix_dpl2" : "copy",
+                codec: "aac",
+                normalize: false,
+                gain: 0,
+                drc: 0,
+                enabled: true,
+                title: `${lang} - ${layout} - ${outCodec} - ${outCh}`,
+                bitrate: "auto",
+                sample_rate: "auto",
+                _channels: s.channels,
+                source_codec: s.codec_name ? s.codec_name.toUpperCase() : "UNKNOWN",
+                source_lang: s.tags?.language ? s.tags.language.toUpperCase() : "",
+                source_bitrate: s.bit_rate,
+                source_sample_rate: s.sample_rate
+              };
+            });
           setAudioConfigs(aConfigs);
         }
       }
@@ -83,30 +116,33 @@ function App() {
   };
 
   const handleStart = async () => {
-    if (!filePath || !mediaInfo) return;
+    if (!filePath || !mediaInfo || !outputPath) return;
     
     try {
-      const outPath = await save({
-        filters: [{
-          name: 'Video',
-          extensions: ['mp4', 'mkv']
-        }]
-      });
-      
-      if (!outPath) return;
+      const exists = await invoke<boolean>("check_file_exists", { path: outputPath });
+      if (exists) {
+        if (!window.confirm(`The file "${outputPath.split(/[\/\\]/).pop()}" already exists.\n\nDo you want to overwrite it?`)) {
+          return;
+        }
+      }
 
       setJobStatus("Starting job...");
       
       const request = {
         input_path: filePath,
-        output_path: outPath,
+        output_path: outputPath,
         video_codec: videoCodec,
         crf: Number(crf),
-        audio_tracks: audioConfigs.map(c => ({
+        audio_tracks: audioConfigs.filter(c => c.enabled).map(c => ({
           input_index: c.input_index,
+          title: c.title,
           action: c.action,
           codec: c.codec,
-          normalize: c.normalize
+          bitrate: c.bitrate,
+          sample_rate: c.sample_rate,
+          normalize: c.normalize,
+          gain: c.gain,
+          drc: c.drc
         }))
       };
 
@@ -115,6 +151,13 @@ function App() {
       console.error(err);
       setJobStatus(`Failed to start job: ${err}`);
     }
+  };
+
+  const handleBrowseOutput = async () => {
+    const outPath = await save({
+      filters: [{ name: 'Video', extensions: ['mp4', 'mkv'] }]
+    });
+    if (outPath) setOutputPath(outPath);
   };
 
   const updateAudioConfig = (index: number, key: string, value: any) => {
@@ -188,7 +231,52 @@ function App() {
           <div className="settings-panel">
             {activeTab === 'audio' && audioConfigs.length > 0 && audioConfigs.map((track, idx) => (
                <div className="settings-card" key={idx}>
-                <h4>Track {track.input_index}: {track._title} ({track._channels === 6 ? '5.1' : track._channels === 2 ? '2.0' : track._channels + ' ch'})</h4>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
+                  <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: '0.7rem', background: 'rgba(255,255,255,0.1)', padding: '0.2rem 0.5rem', borderRadius: '4px', fontWeight: 'bold' }}>
+                      SOURCE: {track.source_codec}
+                    </span>
+                    {track.source_lang && (
+                      <span style={{ fontSize: '0.7rem', background: 'rgba(255,255,255,0.1)', padding: '0.2rem 0.5rem', borderRadius: '4px' }}>
+                        LANG: {track.source_lang}
+                      </span>
+                    )}
+                    {track.source_sample_rate && (
+                      <span style={{ fontSize: '0.7rem', background: 'rgba(255,255,255,0.1)', padding: '0.2rem 0.5rem', borderRadius: '4px' }}>
+                        {Math.round(track.source_sample_rate / 1000)}kHz
+                      </span>
+                    )}
+                    {track.source_bitrate && (
+                      <span style={{ fontSize: '0.7rem', background: 'rgba(255,255,255,0.1)', padding: '0.2rem 0.5rem', borderRadius: '4px' }}>
+                        {Math.round(track.source_bitrate / 1000)}kbps
+                      </span>
+                    )}
+                  </div>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                    <input 
+                      type="checkbox" 
+                      checked={track.enabled} 
+                      onChange={(e) => updateAudioConfig(idx, 'enabled', e.target.checked)} 
+                    />
+                    <span style={{ fontSize: '0.875rem', fontWeight: 'bold', color: track.enabled ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
+                      {track.enabled ? 'Enabled' : 'Disabled'}
+                    </span>
+                  </label>
+                </div>
+                
+                <div style={{ opacity: track.enabled ? 1 : 0.4, pointerEvents: track.enabled ? 'auto' : 'none', transition: 'all 0.2s' }}>
+                  <div style={{ marginBottom: '1rem' }}>
+                    <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                      Track Name
+                    </label>
+                  <input 
+                    type="text" 
+                    className="input-field" 
+                    value={track.title} 
+                    onChange={(e) => updateAudioConfig(idx, 'title', e.target.value)}
+                    style={{ fontWeight: 'bold' }}
+                  />
+                </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem' }}>
                   <div>
                     <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem' }}>Action</label>
@@ -199,35 +287,107 @@ function App() {
                     >
                       <option value="copy">Pass-through (Copy)</option>
                       <option value="discrete_51">Convert & Keep Discrete (5.1)</option>
-                      <option value="upmix_dpl2">Software Upmix (ProLogic II 5.1)</option>
+                      <option value="upmix_51_discrete">Software Upmix (Discrete 5.1 Channels)</option>
+                      <option value="upmix_dpl2">Software Upmix (ProLogic II Stereo Matrix)</option>
                       <option value="convert">Convert (Standard)</option>
                     </select>
                   </div>
                   {track.action !== 'copy' && (
-                    <div>
-                      <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem' }}>Codec</label>
-                      <select 
-                        className="input-field"
-                        value={track.codec}
-                        onChange={(e) => updateAudioConfig(idx, 'codec', e.target.value)}
-                      >
-                        <option value="aac">AAC</option>
-                        <option value="ac3">AC3</option>
-                        <option value="eac3">E-AC3</option>
-                        <option value="libopus">Opus</option>
-                      </select>
-                    </div>
+                    <>
+                      <div style={{ display: 'flex', gap: '0.5rem' }}>
+                        <div style={{ flex: 1 }}>
+                          <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem' }}>Codec</label>
+                          <select 
+                            className="input-field"
+                            value={track.codec}
+                            onChange={(e) => {
+                              updateAudioConfig(idx, 'codec', e.target.value);
+                              updateAudioConfig(idx, 'bitrate', 'auto');
+                            }}
+                          >
+                            <option value="aac">AAC</option>
+                            <option value="ac3">AC3</option>
+                            <option value="eac3">E-AC3</option>
+                            <option value="truehd">TrueHD</option>
+                            <option value="libmp3lame">MP3</option>
+                            <option value="libopus">Opus</option>
+                            <option value="libvorbis">Vorbis</option>
+                            <option value="flac_16">FLAC 16-bit</option>
+                            <option value="flac_24">FLAC 24-bit</option>
+                            <option value="alac_16">ALAC 16-bit</option>
+                            <option value="alac_24">ALAC 24-bit</option>
+                            <option value="pcm_s16le">PCM 16-bit</option>
+                            <option value="pcm_s24le">PCM 24-bit</option>
+                          </select>
+                        </div>
+                        <div style={{ flex: 1 }}>
+                          <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem' }}>Bitrate</label>
+                          <select 
+                            className="input-field"
+                            value={track.bitrate}
+                            onChange={(e) => updateAudioConfig(idx, 'bitrate', e.target.value)}
+                            disabled={["truehd", "flac_16", "flac_24", "alac_16", "alac_24", "pcm_s16le", "pcm_s24le"].includes(track.codec)}
+                          >
+                            <option value="auto">auto</option>
+                            {track.codec === 'aac' && ["64k", "96k", "128k", "192k", "256k", "320k", "448k", "512k", "640k"].map(b => <option key={b} value={b}>{b}</option>)}
+                            {track.codec === 'ac3' && ["192k", "224k", "256k", "320k", "384k", "448k", "512k", "640k"].map(b => <option key={b} value={b}>{b}</option>)}
+                            {track.codec === 'eac3' && ["192k", "256k", "320k", "384k", "448k", "512k", "640k", "768k", "1024k", "1536k", "2048k"].map(b => <option key={b} value={b}>{b}</option>)}
+                            {track.codec === 'libopus' && ["64k", "96k", "128k", "192k", "256k", "320k", "512k"].map(b => <option key={b} value={b}>{b}</option>)}
+                            {track.codec === 'libmp3lame' && ["64k", "96k", "128k", "192k", "256k", "320k"].map(b => <option key={b} value={b}>{b}</option>)}
+                            {track.codec === 'libvorbis' && ["64k", "96k", "128k", "192k", "256k", "320k", "512k"].map(b => <option key={b} value={b}>{b}</option>)}
+                          </select>
+                        </div>
+                        <div style={{ flex: 1 }}>
+                          <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem' }}>Sample Rate</label>
+                          <select 
+                            className="input-field"
+                            value={track.sample_rate}
+                            onChange={(e) => updateAudioConfig(idx, 'sample_rate', e.target.value)}
+                          >
+                            <option value="auto">auto</option>
+                            <option value="44100">44100</option>
+                            <option value="48000">48000</option>
+                            <option value="96000">96000</option>
+                          </select>
+                        </div>
+                      </div>
+                      
+                      <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                        <div style={{ flex: 1 }}>
+                          <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem' }}>Gain (dB)</label>
+                          <input 
+                            type="number" 
+                            className="input-field" 
+                            value={track.gain}
+                            onChange={(e) => updateAudioConfig(idx, 'gain', Number(e.target.value))}
+                            step="0.5"
+                          />
+                        </div>
+                        <div style={{ flex: 1 }}>
+                          <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem' }} title="Dynamic Range Compression. 0 = Disabled. Handbrake scale: 1.0 - 4.0">DRC Level (0-4)</label>
+                          <input 
+                            type="number" 
+                            className="input-field" 
+                            value={track.drc}
+                            onChange={(e) => updateAudioConfig(idx, 'drc', Number(e.target.value))}
+                            step="0.1"
+                            min="0"
+                            max="4"
+                          />
+                        </div>
+                      </div>
+
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '1rem', cursor: 'pointer' }} title="EBU R128 measures perceived loudness across the whole track and adjusts it to a standard broadcast level (-23 LUFS), ensuring consistent volume without just clipping peaks like standard peak normalization.">
+                        <input 
+                          type="checkbox" 
+                          checked={track.normalize}
+                          onChange={(e) => updateAudioConfig(idx, 'normalize', e.target.checked)}
+                        />
+                        <span style={{ fontSize: '0.875rem' }}>Loudness Normalization (EBU R128)</span>
+                      </label>
+                    </>
                   )}
-                  {track.action !== 'copy' && (
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.5rem', cursor: 'pointer' }}>
-                      <input 
-                        type="checkbox" 
-                        checked={track.normalize}
-                        onChange={(e) => updateAudioConfig(idx, 'normalize', e.target.checked)}
-                      />
-                      <span style={{ fontSize: '0.875rem' }}>EBU R128 Normalization</span>
-                    </label>
-                  )}
+                </div>
                 </div>
               </div>
             ))}
@@ -235,11 +395,40 @@ function App() {
               <div style={{ color: 'var(--text-secondary)' }}>No audio tracks found or file not loaded.</div>
             )}
 
-            {activeTab === 'video' && (
-              <div className="settings-card">
-                <h4>Video Encoding</h4>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem' }}>
-                    <div>
+            {activeTab === 'video' && (() => {
+              const videoStream = mediaInfo?.streams?.find((s: any) => s.codec_type === 'video');
+              const fpsParts = videoStream?.r_frame_rate?.split('/');
+              const fps = fpsParts && fpsParts.length === 2 ? (parseInt(fpsParts[0]) / parseInt(fpsParts[1])).toFixed(2) : videoStream?.r_frame_rate;
+              
+              return (
+                <>
+                  {videoStream && (
+                    <div className="settings-card" style={{ marginBottom: '1rem', background: 'rgba(255,255,255,0.05)' }}>
+                      <h4 style={{ margin: '0 0 0.75rem 0', fontSize: '0.875rem', color: 'var(--text-secondary)' }}>Source Video Details</h4>
+                      <div style={{ display: 'flex', gap: '0.75rem', flexWrap: 'wrap', fontSize: '0.85rem' }}>
+                        <span style={{ background: 'rgba(255,255,255,0.1)', padding: '0.2rem 0.5rem', borderRadius: '4px', fontWeight: 'bold' }}>
+                          CODEC: {videoStream.codec_name?.toUpperCase()}
+                        </span>
+                        <span style={{ background: 'rgba(255,255,255,0.1)', padding: '0.2rem 0.5rem', borderRadius: '4px' }}>
+                          RES: {videoStream.width}x{videoStream.height}
+                        </span>
+                        {videoStream.bit_rate && (
+                          <span style={{ background: 'rgba(255,255,255,0.1)', padding: '0.2rem 0.5rem', borderRadius: '4px' }}>
+                            BITRATE: {Math.round(videoStream.bit_rate / 1000)} kbps
+                          </span>
+                        )}
+                        {fps && (
+                          <span style={{ background: 'rgba(255,255,255,0.1)', padding: '0.2rem 0.5rem', borderRadius: '4px' }}>
+                            FPS: {fps}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  <div className="settings-card">
+                    <h4>Video Encoding</h4>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem', marginTop: '1rem' }}>
+                        <div>
                       <label style={{ display: 'block', marginBottom: '0.25rem', fontSize: '0.875rem' }}>Codec & HW Accel</label>
                       <select 
                         className="input-field"
@@ -273,12 +462,29 @@ function App() {
                     )}
                 </div>
               </div>
-            )}
+            </>
+            );
+            })()}
           </div>
         </section>
 
-        {/* Job Queue */}
+        {/* Job Queue & Output Location */}
         <section className="job-queue glass-panel">
+          {filePath && (
+            <div style={{ marginBottom: '1rem' }}>
+              <label style={{ display: 'block', marginBottom: '0.5rem', fontSize: '0.875rem', fontWeight: 'bold' }}>Target Location (Editable)</label>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <input 
+                  type="text" 
+                  className="input-field" 
+                  value={outputPath} 
+                  onChange={(e) => setOutputPath(e.target.value)}
+                  style={{ flex: 1, fontFamily: 'monospace', fontSize: '0.85rem' }}
+                />
+                <button className="btn btn-secondary" onClick={handleBrowseOutput}>Browse</button>
+              </div>
+            </div>
+          )}
           <h4 style={{ margin: 0, marginBottom: '0.5rem' }}>Job Progress</h4>
           <div style={{ flexGrow: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: jobStatus.includes('Error') || jobStatus.includes('Failed') ? 'var(--danger-color)' : jobStatus.includes('success') ? 'var(--success-color)' : 'var(--text-primary)', background: 'rgba(0,0,0,0.2)', borderRadius: '6px', padding: '1rem', fontFamily: 'monospace' }}>
             {jobStatus}
