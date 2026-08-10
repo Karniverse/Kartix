@@ -14,7 +14,9 @@ Kartix Convert is a high-performance, modern video converter built with Rust and
   - Pass-through support for lossless audio copying.
 - **Hardware Acceleration Detection**: Automatically profiles your system for NVENC (Nvidia), QSV (Intel), and AMF (AMD) encoders to accelerate video rendering.
 - **Modern UI**: A premium React-based frontend featuring dark mode and reactive glass panels.
+- **Chapter Generation**: Intelligently auto-generate spaced chapter intervals, with a placeholder for experimental FFmpeg scene-detection.
 - **Job Queueing**: Queue up multiple files for batch processing and monitor real-time encoding progress.
+- **Automated Releases**: Fully automated GitHub release workflow via CLI, handling MSI generation, Beta tagging, and changelog parsing.
 
 ## Prerequisites
 

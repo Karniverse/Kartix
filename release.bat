@@ -34,9 +34,14 @@ git commit -m "Release %VERSION%"
 git push origin main
 echo.
 
+set IS_PRERELEASE=
+if not "%SUFFIX%"=="" (
+    set IS_PRERELEASE=--prerelease
+)
+
 echo [4/4] Creating GitHub Release using GitHub CLI (gh)...
 REM Assuming you have 'gh' installed and authenticated (gh auth login)
-gh release create "%TAG_NAME%" "src-tauri\target\release\bundle\msi\*.msi" -t "%VERSION%" -F CHANGELOG.md
+gh release create "%TAG_NAME%" "src-tauri\target\release\bundle\msi\*.msi" -t "%VERSION%" -F CHANGELOG.md %IS_PRERELEASE%
 echo.
 
 echo Release Complete! Check your GitHub Repository.
