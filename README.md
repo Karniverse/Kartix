@@ -17,7 +17,7 @@ Kartix Convert is a high-performance, modern video converter built with Rust and
 - **Chapter Generation**: Intelligently auto-generate spaced chapter intervals, with a placeholder for experimental FFmpeg scene-detection.
 - **Job Queueing**: Queue up multiple files for batch processing and monitor real-time encoding progress.
 - **Automated Releases**: Fully automated GitHub release workflow via CLI, handling MSI generation, Beta tagging, and changelog parsing.
-
+- **"Holy Grail" Trims**: An extremely robust FFmpeg trimming strategy utilizing a double-input architecture to guarantee instantaneous hardware-seek trims, perfectly preserved A/V sync, zero phantom duration, and OOM-prevention during complex scaling pipelines.
 ## Prerequisites
 
 - **FFmpeg & FFprobe**: Kartix Convert acts as an intelligent orchestrator for FFmpeg. You must have `ffmpeg` and `ffprobe` installed on your system and available in your system's PATH.

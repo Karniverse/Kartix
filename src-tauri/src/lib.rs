@@ -68,6 +68,8 @@ pub struct JobRequest {
     pub keep_chapters: bool,
     pub custom_chapters: Vec<ChapterConfig>,
     pub cover_art_tracks: Vec<usize>,
+    pub trim_start: String,
+    pub trim_end: String,
 }
 
 #[tauri::command]
@@ -105,19 +107,135 @@ async fn analyze_file(file_path: String) -> Result<MediaInfo, String> {
     })
 }
 
+fn parse_time(time_str: &str) -> Result<f64, ()> {
+    let parts: Vec<&str> = time_str.trim().split(':').collect();
+    match parts.len() {
+        3 => {
+            let h: f64 = parts[0].trim().parse().unwrap_or(0.0);
+            let m: f64 = parts[1].trim().parse().unwrap_or(0.0);
+            let s: f64 = parts[2].trim().parse().unwrap_or(0.0);
+            Ok(h * 3600.0 + m * 60.0 + s)
+        },
+        2 => {
+            let m: f64 = parts[0].trim().parse().unwrap_or(0.0);
+            let s: f64 = parts[1].trim().parse().unwrap_or(0.0);
+            Ok(m * 60.0 + s)
+        },
+        1 => {
+            if let Ok(s) = parts[0].trim().parse::<f64>() {
+                Ok(s)
+            } else {
+                Err(())
+            }
+        },
+        _ => Err(())
+    }
+}
+
 #[tauri::command]
 fn start_job(app: AppHandle, request: JobRequest) -> Result<(), String> {
     thread::spawn(move || {
         let mut args = vec![
             "-y".to_string(), // overwrite output
-            "-i".to_string(), request.input_path.clone(),
         ];
 
-        // Map video
+        let mut trim_duration_sec = 0.0;
+        let mut trim_start_sec = 0.0;
+        let mut is_trimming = false;
+
+        // Trimming inputs
+        if !request.trim_start.is_empty() {
+            if let Ok(ts) = parse_time(&request.trim_start) {
+                if ts > 0.0 {
+                    trim_start_sec = ts;
+                    is_trimming = true;
+                    args.push("-ss".to_string());
+                    args.push(request.trim_start.clone());
+                    args.push("-copyts".to_string());
+                }
+            }
+        }
+        
+        if is_trimming && !request.trim_end.is_empty() {
+            if let Ok(te) = parse_time(&request.trim_end) {
+                if te > trim_start_sec {
+                    trim_duration_sec = te - trim_start_sec;
+                }
+            }
+        }
+
+        // Add main input file (Input 0)
+        args.push("-i".to_string());
+        args.push(request.input_path.clone());
+
+        // Add secondary input file specifically for subtitles to prevent filter graph deadlock (Input 1)
+        if is_trimming {
+            args.push("-ss".to_string());
+            args.push(request.trim_start.clone());
+            args.push("-copyts".to_string());
+        }
+        args.push("-i".to_string());
+        args.push(request.input_path.clone());
+
+        let mut has_meta_file = false;
+        if !request.custom_chapters.is_empty() {
+            let meta_path = format!("{}.metadata.txt", request.output_path);
+            let mut meta_content = String::from(";FFMETADATA1\n");
+            for chap in &request.custom_chapters {
+                let mut start = chap.start_time - trim_start_sec;
+                let mut end = chap.end_time - trim_start_sec;
+                
+                if end <= 0.0 { continue; }
+                if start < 0.0 { start = 0.0; }
+                
+                // If the chapter starts after the trimmed video ends, skip it
+                if trim_duration_sec > 0.0 && start >= trim_duration_sec { continue; }
+                
+                // If the chapter ends after the trimmed video ends, clamp the end time
+                if trim_duration_sec > 0.0 && end > trim_duration_sec { end = trim_duration_sec; }
+
+                meta_content.push_str("[CHAPTER]\n");
+                meta_content.push_str("TIMEBASE=1/1000\n");
+                meta_content.push_str(&format!("START={}\n", (start * 1000.0) as i64));
+                meta_content.push_str(&format!("END={}\n", (end * 1000.0) as i64));
+                meta_content.push_str(&format!("title={}\n", chap.title));
+            }
+            if std::fs::write(&meta_path, meta_content).is_ok() {
+                // Metadata file (Input 2)
+                args.push("-i".to_string());
+                args.push(meta_path);
+                has_meta_file = true;
+            }
+        }
+
+        // Output flags to drop pre-roll and reset PTS
+        if is_trimming {
+            args.push("-ss".to_string());
+            args.push(request.trim_start.clone());
+            if trim_duration_sec > 0.0 {
+                args.push("-t".to_string());
+                args.push(trim_duration_sec.to_string());
+            }
+            args.push("-output_ts_offset".to_string());
+            args.push(format!("-{}", trim_start_sec));
+        }
+
+        // Map video (from Input 0)
         args.push("-map".to_string());
         args.push("0:v:0".to_string());
         args.push("-c:v".to_string());
         args.push(request.video_codec.clone());
+
+        // Chapters
+        if !request.keep_chapters && request.custom_chapters.is_empty() {
+            args.push("-map_chapters".to_string());
+            args.push("-1".to_string());
+        } else if has_meta_file {
+            args.push("-map_metadata".to_string());
+            // Map metadata from Input 2
+            args.push("2".to_string());
+        }
+
         if request.video_codec != "copy" {
             // Pixel format
             if request.pixel_format != "auto" {
@@ -315,7 +433,7 @@ fn start_job(app: AppHandle, request: JobRequest) -> Result<(), String> {
         for sub in request.subtitle_tracks.iter() {
             if sub.action == "copy" {
                 args.push("-map".to_string());
-                args.push(format!("0:{}", sub.input_index));
+                args.push(format!("1:{}", sub.input_index));
 
                 args.push(format!("-c:s:{}", sub_out_idx));
                 args.push("copy".to_string());
@@ -347,30 +465,7 @@ fn start_job(app: AppHandle, request: JobRequest) -> Result<(), String> {
             }
         }
 
-        // Chapters
-        if !request.keep_chapters && request.custom_chapters.is_empty() {
-            args.push("-map_chapters".to_string());
-            args.push("-1".to_string());
-        } else if !request.custom_chapters.is_empty() {
-            // Write FFMETADATA file for custom chapters
-            let meta_path = format!("{}.metadata.txt", request.output_path);
-            let mut meta_content = String::from(";FFMETADATA1\n");
-            
-            for chap in &request.custom_chapters {
-                meta_content.push_str("[CHAPTER]\n");
-                meta_content.push_str("TIMEBASE=1/1000\n");
-                meta_content.push_str(&format!("START={}\n", (chap.start_time * 1000.0) as i64));
-                meta_content.push_str(&format!("END={}\n", (chap.end_time * 1000.0) as i64));
-                meta_content.push_str(&format!("title={}\n", chap.title));
-            }
-            
-            if std::fs::write(&meta_path, meta_content).is_ok() {
-                args.push("-i".to_string());
-                args.push(meta_path.clone());
-                args.push("-map_metadata".to_string());
-                args.push("1".to_string());
-            }
-        }
+
 
         // Cover Art / Attachments
         let mut cover_idx_counter = 1; // Since 0 is usually main video
@@ -383,6 +478,10 @@ fn start_job(app: AppHandle, request: JobRequest) -> Result<(), String> {
             args.push("attached_pic".to_string());
             cover_idx_counter += 1;
         }
+
+        // Muxer flags to improve stability with fast-seeks or weird subtitle streams
+        args.push("-max_muxing_queue_size".to_string());
+        args.push("102400".to_string());
 
         args.push(request.output_path.clone());
 

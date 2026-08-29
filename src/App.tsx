@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import { openPath } from '@tauri-apps/plugin-opener';
 import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 import versionData from "./version.json";
@@ -12,6 +13,13 @@ function App() {
   const [encoders, setEncoders] = useState<string[]>([]);
   const [jobStatus, setJobStatus] = useState<string>("No active jobs.");
   const [outputPath, setOutputPath] = useState<string>("");
+
+  const formatTime = (seconds: number) => {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+  };
   
   // Settings State
   const [videoCodec, setVideoCodec] = useState("libx264");
@@ -26,6 +34,10 @@ function App() {
   const [keepChapters, setKeepChapters] = useState(true);
   const [keepCoverArt, setKeepCoverArt] = useState(true);
   const [coverArtTracks, setCoverArtTracks] = useState<number[]>([]);
+
+  const [trimStart, setTrimStart] = useState("");
+  const [trimEnd, setTrimEnd] = useState("");
+  const [playhead, setPlayhead] = useState(0);
 
   // Video Advanced State
   const [videoResolution, setVideoResolution] = useState("Original");
@@ -254,6 +266,8 @@ function App() {
         keep_chapters: keepChapters,
         custom_chapters: chapters,
         cover_art_tracks: keepCoverArt ? coverArtTracks : [],
+        trim_start: trimStart,
+        trim_end: trimEnd,
       };
 
       await invoke("start_job", { request });
@@ -274,9 +288,22 @@ function App() {
 
   const handleBrowseOutput = async () => {
     const outPath = await save({
-      filters: [{ name: 'Video', extensions: ['mp4', 'mkv'] }]
+      filters: [{ name: 'Video', extensions: ['mkv', 'mp4', 'avi', 'mov', 'webm'] }]
     });
     if (outPath) setOutputPath(outPath);
+  };
+
+  const handleOpenFolder = async () => {
+    if (!outputPath) return;
+    try {
+      // Extract directory path by removing the filename
+      const folderPath = outputPath.substring(0, Math.max(outputPath.lastIndexOf('\\'), outputPath.lastIndexOf('/')));
+      if (folderPath) {
+        await openPath(folderPath);
+      }
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   const updateAudioConfig = (index: number, key: string, value: any) => {
@@ -946,6 +973,81 @@ function App() {
                   )}
                 </div>
 
+                <div className="glass-panel" style={{ padding: '1.5rem', marginBottom: '1.5rem' }}>
+                  <h3 style={{ margin: '0 0 1rem 0' }}>✂️ Trim / Select Region</h3>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                    
+                    {/* Playhead Slider */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                      <span style={{ fontSize: '0.9rem', width: '60px' }}>{formatTime(playhead)}</span>
+                      <input 
+                        type="range" 
+                        min="0" 
+                        max={mediaInfo?.format?.duration ? parseFloat(mediaInfo.format.duration) : 100}
+                        step="1"
+                        value={playhead}
+                        onChange={(e) => setPlayhead(Number(e.target.value))}
+                        style={{ flex: 1, accentColor: 'var(--accent-color)' }}
+                      />
+                      <span style={{ fontSize: '0.9rem', width: '60px', textAlign: 'right' }}>
+                        {mediaInfo?.format?.duration ? formatTime(parseFloat(mediaInfo.format.duration)) : "00:00:00"}
+                      </span>
+                    </div>
+
+                    {/* Inputs & Buttons */}
+                    <div style={{ display: 'flex', gap: '2rem', alignItems: 'flex-end' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', flex: 1 }}>
+                        <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Start Time (HH:MM:SS)</label>
+                        <div style={{ display: 'flex', gap: '0.5rem' }}>
+                          <input 
+                            type="text" 
+                            className="input-field" 
+                            placeholder="00:00:00"
+                            value={trimStart}
+                            onChange={(e) => setTrimStart(e.target.value)}
+                            style={{ flex: 1 }}
+                          />
+                          <button 
+                            className="btn btn-secondary" 
+                            onClick={() => setTrimStart(formatTime(playhead))}
+                          >
+                            Set 📍
+                          </button>
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', flex: 1 }}>
+                        <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>End Time (HH:MM:SS)</label>
+                        <div style={{ display: 'flex', gap: '0.5rem' }}>
+                          <input 
+                            type="text" 
+                            className="input-field" 
+                            placeholder="00:00:00"
+                            value={trimEnd}
+                            onChange={(e) => setTrimEnd(e.target.value)}
+                            style={{ flex: 1 }}
+                          />
+                          <button 
+                            className="btn btn-secondary" 
+                            onClick={() => setTrimEnd(formatTime(playhead))}
+                          >
+                            Set 🏁
+                          </button>
+                        </div>
+                      </div>
+                      
+                      <button 
+                        className="btn btn-secondary" 
+                        onClick={() => { setTrimStart(""); setTrimEnd(""); }}
+                        title="Clear Trim Region"
+                      >
+                        ❌ Clear
+                      </button>
+                    </div>
+
+                  </div>
+                </div>
+
                 <div className="glass-panel" style={{ padding: '1.5rem', marginBottom: '1.5rem', border: '1px dashed var(--border-color)', background: 'rgba(255,255,255,0.02)' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <div>
@@ -1062,6 +1164,7 @@ function App() {
                   style={{ flex: 1, fontFamily: 'monospace', fontSize: '0.85rem' }}
                 />
                 <button className="btn btn-secondary" onClick={handleBrowseOutput}>Browse</button>
+                <button className="btn btn-secondary" onClick={handleOpenFolder} title="Open Output Folder">📂</button>
               </div>
             </div>
           )}
