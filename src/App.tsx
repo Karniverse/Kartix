@@ -77,7 +77,7 @@ function App() {
     }).catch(console.error);
 
     // Check for updates silently in background
-    invoke<any>("check_for_updates").then(info => {
+    invoke<any>("check_for_updates", { currentVersion: versionData.version }).then(info => {
       if (info?.available) {
         setUpdateInfo(info);
       }
@@ -230,7 +230,7 @@ function App() {
     setIsCheckingUpdate(true);
     setUpdateInfo(null);
     try {
-      const info = await invoke<any>("check_for_updates");
+      const info = await invoke<any>("check_for_updates", { currentVersion: versionData.version });
       setUpdateInfo(info);
     } catch (err) {
       console.error(err);
@@ -453,37 +453,39 @@ function App() {
               🚀 Start Conversion
             </button>
           )}
-            <div style={{ marginTop: '1rem', borderTop: '1px solid var(--border-color)', paddingTop: '1rem' }}>
-              {updateInfo?.available ? (
-                <div style={{ background: 'rgba(46, 204, 113, 0.1)', padding: '0.75rem', borderRadius: '6px', border: '1px solid #2ecc71', fontSize: '0.8rem' }}>
-                  <div style={{ fontWeight: 'bold', color: '#2ecc71', marginBottom: '0.25rem' }}>Update Available! ({updateInfo.latest_version})</div>
-                  <button 
-                    className="btn btn-primary" 
-                    onClick={handleDownloadUpdate} 
-                    disabled={isUpdating}
-                    style={{ width: '100%', padding: '0.5rem', marginTop: '0.5rem', fontSize: '0.8rem' }}
-                  >
-                    {isUpdating ? "Downloading..." : "Install Update"}
-                  </button>
-                </div>
-              ) : (
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
-                    v{versionData.version}
-                  </div>
-                  <button 
-                    className="btn btn-secondary" 
-                    onClick={handleCheckUpdates} 
-                    disabled={isCheckingUpdate}
-                    style={{ padding: '0.25rem 0.5rem', fontSize: '0.7rem' }}
-                  >
-                    {isCheckingUpdate ? "..." : "Check Update"}
-                  </button>
-                </div>
+          <div style={{ marginTop: '1rem', borderTop: '1px solid var(--border-color)', paddingTop: '1rem' }}>
+            {updateInfo?.available && (
+              <div style={{ background: 'rgba(46, 204, 113, 0.1)', padding: '0.75rem', borderRadius: '6px', border: '1px solid #2ecc71', fontSize: '0.8rem', marginBottom: '0.75rem' }}>
+                <div style={{ fontWeight: 'bold', color: '#2ecc71', marginBottom: '0.25rem' }}>Update Available! ({updateInfo.latest_version})</div>
+                <button 
+                  className="btn btn-primary" 
+                  onClick={handleDownloadUpdate} 
+                  disabled={isUpdating}
+                  style={{ width: '100%', padding: '0.5rem', marginTop: '0.5rem', fontSize: '0.8rem' }}
+                >
+                  {isUpdating ? "Downloading..." : "Install Update"}
+                </button>
+              </div>
+            )}
+            
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                v{versionData.version}
+              </div>
+              {!updateInfo?.available && (
+                <button 
+                  className="btn btn-secondary" 
+                  onClick={handleCheckUpdates} 
+                  disabled={isCheckingUpdate}
+                  style={{ padding: '0.25rem 0.5rem', fontSize: '0.7rem' }}
+                >
+                  {isCheckingUpdate ? "..." : "Check Update"}
+                </button>
               )}
             </div>
           </div>
-        </aside>
+        </div>
+      </aside>
 
       {/* Main Content Area */}
       <main className="main-content">

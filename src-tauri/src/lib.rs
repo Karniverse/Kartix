@@ -609,7 +609,7 @@ pub struct UpdateInfo {
 }
 
 #[tauri::command]
-fn check_for_updates() -> Result<UpdateInfo, String> {
+fn check_for_updates(current_version: String) -> Result<UpdateInfo, String> {
     let repo = "Karniverse/Kartix";
     // Fetch all releases (includes pre-releases) instead of just latest
     let url = format!("https://api.github.com/repos/{}/releases", repo);
@@ -643,18 +643,21 @@ fn check_for_updates() -> Result<UpdateInfo, String> {
         }
     }
     
-    let current_version = env!("CARGO_PKG_VERSION");
     let mut latest_version = tag_name.clone();
-    if latest_version.starts_with('v') {
-        latest_version = latest_version[1..].to_string();
+    if latest_version.starts_with('v') || latest_version.starts_with('V') {
+        latest_version = latest_version[1..].trim().to_string();
     }
     
-    // Simple version comparison (e.g. 0.1.0 vs 0.1.1)
-    let available = !latest_version.is_empty() && latest_version != current_version && !download_url.is_empty();
+    let mut current = current_version.clone();
+    if current.starts_with('v') || current.starts_with('V') {
+        current = current[1..].trim().to_string();
+    }
+    
+    let available = !latest_version.is_empty() && latest_version != current && !download_url.is_empty();
     
     Ok(UpdateInfo {
         available,
-        latest_version,
+        latest_version: tag_name,
         release_notes: body,
         download_url,
     })
