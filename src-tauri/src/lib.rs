@@ -223,7 +223,7 @@ fn start_job(app: AppHandle, request: JobRequest) -> Result<(), String> {
         // Map video (from Input 0)
         args.push("-map".to_string());
         args.push("0:v:0".to_string());
-        args.push("-c:v".to_string());
+        args.push("-c:v:0".to_string());
         args.push(request.video_codec.clone());
 
         // Chapters
@@ -323,7 +323,7 @@ fn start_job(app: AppHandle, request: JobRequest) -> Result<(), String> {
             }
 
             if !vfilters.is_empty() {
-                args.push("-vf".to_string());
+                args.push("-filter:v:0".to_string());
                 args.push(vfilters.join(","));
             }
 
@@ -503,6 +503,7 @@ fn start_job(app: AppHandle, request: JobRequest) -> Result<(), String> {
         let state = app.state::<JobState>();
         *state.0.lock().unwrap() = Some(pid);
 
+        let mut last_error_lines = std::collections::VecDeque::new();
         if let Some(mut stderr) = child.stderr.take() {
             let mut buffer = [0; 1024];
             let mut line_buf = String::new();
@@ -513,6 +514,10 @@ fn start_job(app: AppHandle, request: JobRequest) -> Result<(), String> {
                     if c == '\r' || c == '\n' {
                         if !line_buf.is_empty() {
                             let _ = app.emit("job-progress", line_buf.clone());
+                            if last_error_lines.len() >= 5 {
+                                last_error_lines.pop_front();
+                            }
+                            last_error_lines.push_back(line_buf.clone());
                             line_buf.clear();
                         }
                     } else {
@@ -521,7 +526,11 @@ fn start_job(app: AppHandle, request: JobRequest) -> Result<(), String> {
                 }
             }
             if !line_buf.is_empty() {
-                let _ = app.emit("job-progress", line_buf);
+                let _ = app.emit("job-progress", line_buf.clone());
+                if last_error_lines.len() >= 5 {
+                    last_error_lines.pop_front();
+                }
+                last_error_lines.push_back(line_buf);
             }
         }
 
@@ -533,8 +542,13 @@ fn start_job(app: AppHandle, request: JobRequest) -> Result<(), String> {
         if status.success() {
             let _ = app.emit("job-success", request.output_path);
         } else {
-            // It could be cancelled or failed.
-            let _ = app.emit("job-error", "FFmpeg job failed or was cancelled".to_string());
+            let error_msg = if last_error_lines.is_empty() {
+                "FFmpeg job failed or was cancelled".to_string()
+            } else {
+                let joined = last_error_lines.into_iter().collect::<Vec<_>>().join(" | ");
+                format!("FFmpeg failed: {}", joined)
+            };
+            let _ = app.emit("job-error", error_msg);
         }
     });
 
@@ -586,13 +600,110 @@ async fn get_encoders() -> Result<Vec<String>, String> {
     Ok(encoders)
 }
 
+#[derive(Serialize)]
+pub struct UpdateInfo {
+    pub available: bool,
+    pub latest_version: String,
+    pub release_notes: String,
+    pub download_url: String,
+}
+
+#[tauri::command]
+fn check_for_updates() -> Result<UpdateInfo, String> {
+    let repo = "Karniverse/Kartix";
+    // Fetch all releases (includes pre-releases) instead of just latest
+    let url = format!("https://api.github.com/repos/{}/releases", repo);
+    
+    let resp = ureq::get(&url)
+        .set("User-Agent", "Kartix-Updater")
+        .call()
+        .map_err(|e| format!("Failed to fetch updates: {}", e))?;
+        
+    let json: serde_json::Value = resp.into_json()
+        .map_err(|e| format!("Invalid JSON response: {}", e))?;
+        
+    // GitHub returns an array of releases, sorted by newest first
+    let latest_release = json.as_array()
+        .and_then(|arr| arr.first())
+        .ok_or("No releases found")?;
+        
+    let tag_name = latest_release["tag_name"].as_str().unwrap_or("").to_string();
+    let body = latest_release["body"].as_str().unwrap_or("").to_string();
+    
+    // Find MSI asset
+    let mut download_url = String::new();
+    if let Some(assets) = latest_release["assets"].as_array() {
+        for asset in assets {
+            if let Some(name) = asset["name"].as_str() {
+                if name.ends_with(".msi") {
+                    download_url = asset["browser_download_url"].as_str().unwrap_or("").to_string();
+                    break;
+                }
+            }
+        }
+    }
+    
+    let current_version = env!("CARGO_PKG_VERSION");
+    let mut latest_version = tag_name.clone();
+    if latest_version.starts_with('v') {
+        latest_version = latest_version[1..].to_string();
+    }
+    
+    // Simple version comparison (e.g. 0.1.0 vs 0.1.1)
+    let available = !latest_version.is_empty() && latest_version != current_version && !download_url.is_empty();
+    
+    Ok(UpdateInfo {
+        available,
+        latest_version,
+        release_notes: body,
+        download_url,
+    })
+}
+
+#[tauri::command]
+fn download_and_install_update(url: String) -> Result<(), String> {
+    let temp_dir = std::env::temp_dir();
+    let msi_path = temp_dir.join("Kartix_Update.msi");
+    
+    let resp = ureq::get(&url)
+        .set("User-Agent", "Kartix-Updater")
+        .call()
+        .map_err(|e| format!("Download failed: {}", e))?;
+        
+    let mut file = std::fs::File::create(&msi_path)
+        .map_err(|e| format!("Failed to create temp file: {}", e))?;
+        
+    std::io::copy(&mut resp.into_reader(), &mut file)
+        .map_err(|e| format!("Failed to write file: {}", e))?;
+        
+    // Spawn MSI installer detached
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", msi_path.to_str().unwrap()])
+            .spawn()
+            .map_err(|e| format!("Failed to start installer: {}", e))?;
+    }
+    
+    // Exit current app so installer can overwrite it
+    std::process::exit(0);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(JobState(Mutex::new(None)))
-        .invoke_handler(tauri::generate_handler![analyze_file, start_job, get_encoders, check_file_exists, cancel_job])
+        .invoke_handler(tauri::generate_handler![
+            analyze_file, 
+            start_job, 
+            get_encoders, 
+            check_file_exists, 
+            cancel_job,
+            check_for_updates,
+            download_and_install_update
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

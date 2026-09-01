@@ -14,6 +14,10 @@ function App() {
   const [jobStatus, setJobStatus] = useState<string>("No active jobs.");
   const [outputPath, setOutputPath] = useState<string>("");
 
+  const [updateInfo, setUpdateInfo] = useState<any>(null);
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [isUpdating, setIsUpdating] = useState(false);
+
   const formatTime = (seconds: number) => {
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
@@ -69,7 +73,15 @@ function App() {
       if (encs.some(e => e.includes("NVENC"))) setVideoCodec("h264_nvenc");
       else if (encs.some(e => e.includes("QSV"))) setVideoCodec("h264_qsv");
       else if (encs.some(e => e.includes("AMF"))) setVideoCodec("h264_amf");
+      else if (encs.some(e => e.includes("VideoToolbox"))) setVideoCodec("h264_videotoolbox");
     }).catch(console.error);
+
+    // Check for updates silently in background
+    invoke<any>("check_for_updates").then(info => {
+      if (info?.available) {
+        setUpdateInfo(info);
+      }
+    }).catch(() => {});
 
     const unlistenSuccess = listen("job-success", (event) => {
       setJobStatus(`Job Completed successfully! Saved to: ${event.payload}`);
@@ -211,6 +223,32 @@ function App() {
     } catch (err) {
       console.error(err);
       setJobStatus(`Error: ${err}`);
+    }
+  };
+
+  const handleCheckUpdates = async () => {
+    setIsCheckingUpdate(true);
+    setUpdateInfo(null);
+    try {
+      const info = await invoke<any>("check_for_updates");
+      setUpdateInfo(info);
+    } catch (err) {
+      console.error(err);
+      alert(`Failed to check for updates: ${err}`);
+    } finally {
+      setIsCheckingUpdate(false);
+    }
+  };
+
+  const handleDownloadUpdate = async () => {
+    if (!updateInfo || !updateInfo.download_url) return;
+    setIsUpdating(true);
+    try {
+      await invoke("download_and_install_update", { url: updateInfo.download_url });
+    } catch (err) {
+      console.error(err);
+      alert(`Failed to download update: ${err}`);
+      setIsUpdating(false);
     }
   };
 
@@ -415,11 +453,37 @@ function App() {
               🚀 Start Conversion
             </button>
           )}
-          <div style={{ textAlign: 'center', marginTop: '0.75rem', fontSize: '0.65rem', color: 'var(--text-secondary)', opacity: 0.5 }}>
-            {versionData.version}
+            <div style={{ marginTop: '1rem', borderTop: '1px solid var(--border-color)', paddingTop: '1rem' }}>
+              {updateInfo?.available ? (
+                <div style={{ background: 'rgba(46, 204, 113, 0.1)', padding: '0.75rem', borderRadius: '6px', border: '1px solid #2ecc71', fontSize: '0.8rem' }}>
+                  <div style={{ fontWeight: 'bold', color: '#2ecc71', marginBottom: '0.25rem' }}>Update Available! ({updateInfo.latest_version})</div>
+                  <button 
+                    className="btn btn-primary" 
+                    onClick={handleDownloadUpdate} 
+                    disabled={isUpdating}
+                    style={{ width: '100%', padding: '0.5rem', marginTop: '0.5rem', fontSize: '0.8rem' }}
+                  >
+                    {isUpdating ? "Downloading..." : "Install Update"}
+                  </button>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                    v{versionData.version}
+                  </div>
+                  <button 
+                    className="btn btn-secondary" 
+                    onClick={handleCheckUpdates} 
+                    disabled={isCheckingUpdate}
+                    style={{ padding: '0.25rem 0.5rem', fontSize: '0.7rem' }}
+                  >
+                    {isCheckingUpdate ? "..." : "Check Update"}
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
-        </div>
-      </aside>
+        </aside>
 
       {/* Main Content Area */}
       <main className="main-content">
@@ -456,6 +520,7 @@ function App() {
               <button className={`btn ${activeTab === 'audio' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('audio')}>Audio</button>
               <button className={`btn ${activeTab === 'subtitles' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('subtitles')}>Subtitles</button>
               <button className={`btn ${activeTab === 'metadata' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('metadata')}>Chapters & Metadata</button>
+              <button className={`btn ${activeTab === 'trim' ? 'btn-primary' : 'btn-secondary'}`} onClick={() => setActiveTab('trim')}>Trim</button>
             </nav>
           </div>
 
@@ -971,82 +1036,7 @@ function App() {
                       {coverArtTracks.length} cover image(s) will be removed.
                     </div>
                   )}
-                </div>
-
-                <div className="glass-panel" style={{ padding: '1.5rem', marginBottom: '1.5rem' }}>
-                  <h3 style={{ margin: '0 0 1rem 0' }}>✂️ Trim / Select Region</h3>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                    
-                    {/* Playhead Slider */}
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                      <span style={{ fontSize: '0.9rem', width: '60px' }}>{formatTime(playhead)}</span>
-                      <input 
-                        type="range" 
-                        min="0" 
-                        max={mediaInfo?.format?.duration ? parseFloat(mediaInfo.format.duration) : 100}
-                        step="1"
-                        value={playhead}
-                        onChange={(e) => setPlayhead(Number(e.target.value))}
-                        style={{ flex: 1, accentColor: 'var(--accent-color)' }}
-                      />
-                      <span style={{ fontSize: '0.9rem', width: '60px', textAlign: 'right' }}>
-                        {mediaInfo?.format?.duration ? formatTime(parseFloat(mediaInfo.format.duration)) : "00:00:00"}
-                      </span>
-                    </div>
-
-                    {/* Inputs & Buttons */}
-                    <div style={{ display: 'flex', gap: '2rem', alignItems: 'flex-end' }}>
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', flex: 1 }}>
-                        <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Start Time (HH:MM:SS)</label>
-                        <div style={{ display: 'flex', gap: '0.5rem' }}>
-                          <input 
-                            type="text" 
-                            className="input-field" 
-                            placeholder="00:00:00"
-                            value={trimStart}
-                            onChange={(e) => setTrimStart(e.target.value)}
-                            style={{ flex: 1 }}
-                          />
-                          <button 
-                            className="btn btn-secondary" 
-                            onClick={() => setTrimStart(formatTime(playhead))}
-                          >
-                            Set 📍
-                          </button>
-                        </div>
-                      </div>
-
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', flex: 1 }}>
-                        <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>End Time (HH:MM:SS)</label>
-                        <div style={{ display: 'flex', gap: '0.5rem' }}>
-                          <input 
-                            type="text" 
-                            className="input-field" 
-                            placeholder="00:00:00"
-                            value={trimEnd}
-                            onChange={(e) => setTrimEnd(e.target.value)}
-                            style={{ flex: 1 }}
-                          />
-                          <button 
-                            className="btn btn-secondary" 
-                            onClick={() => setTrimEnd(formatTime(playhead))}
-                          >
-                            Set 🏁
-                          </button>
-                        </div>
-                      </div>
-                      
-                      <button 
-                        className="btn btn-secondary" 
-                        onClick={() => { setTrimStart(""); setTrimEnd(""); }}
-                        title="Clear Trim Region"
-                      >
-                        ❌ Clear
-                      </button>
-                    </div>
-
-                  </div>
-                </div>
+                              </div>
 
                 <div className="glass-panel" style={{ padding: '1.5rem', marginBottom: '1.5rem', border: '1px dashed var(--border-color)', background: 'rgba(255,255,255,0.02)' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1144,6 +1134,86 @@ function App() {
                       })}
                     </div>
                   )}
+                </div>
+              </div>
+            )}
+
+            {/* Trim Tab */}
+            {activeTab === 'trim' && (
+              <div className="tab-content" style={{ animation: 'fadeIn 0.3s ease', gridColumn: '1 / -1' }}>
+                <div className="glass-panel" style={{ padding: '1.5rem', marginBottom: '1.5rem' }}>
+                  <h3 style={{ margin: '0 0 1rem 0' }}>✂️ Trim / Select Region</h3>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                    
+                    {/* Playhead Slider */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                      <span style={{ fontSize: '0.9rem', width: '60px' }}>{formatTime(playhead)}</span>
+                      <input 
+                        type="range" 
+                        min="0" 
+                        max={mediaInfo?.format?.duration ? parseFloat(mediaInfo.format.duration) : 100}
+                        step="1"
+                        value={playhead}
+                        onChange={(e) => setPlayhead(Number(e.target.value))}
+                        style={{ flex: 1, accentColor: 'var(--accent-color)' }}
+                      />
+                      <span style={{ fontSize: '0.9rem', width: '60px', textAlign: 'right' }}>
+                        {mediaInfo?.format?.duration ? formatTime(parseFloat(mediaInfo.format.duration)) : "00:00:00"}
+                      </span>
+                    </div>
+
+                    {/* Inputs & Buttons */}
+                    <div style={{ display: 'flex', gap: '2rem', alignItems: 'flex-end' }}>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', flex: 1 }}>
+                        <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>Start Time (HH:MM:SS)</label>
+                        <div style={{ display: 'flex', gap: '0.5rem' }}>
+                          <input 
+                            type="text" 
+                            className="input-field" 
+                            placeholder="00:00:00"
+                            value={trimStart}
+                            onChange={(e) => setTrimStart(e.target.value)}
+                            style={{ flex: 1 }}
+                          />
+                          <button 
+                            className="btn btn-secondary" 
+                            onClick={() => setTrimStart(formatTime(playhead))}
+                          >
+                            Set 👈
+                          </button>
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', flex: 1 }}>
+                        <label style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>End Time (HH:MM:SS)</label>
+                        <div style={{ display: 'flex', gap: '0.5rem' }}>
+                          <input 
+                            type="text" 
+                            className="input-field" 
+                            placeholder="00:00:00"
+                            value={trimEnd}
+                            onChange={(e) => setTrimEnd(e.target.value)}
+                            style={{ flex: 1 }}
+                          />
+                          <button 
+                            className="btn btn-secondary" 
+                            onClick={() => setTrimEnd(formatTime(playhead))}
+                          >
+                            Set 👉
+                          </button>
+                        </div>
+                      </div>
+                      
+                      <button 
+                        className="btn btn-secondary" 
+                        onClick={() => { setTrimStart(""); setTrimEnd(""); }}
+                        title="Clear Trim Region"
+                      >
+                        ❌ Clear
+                      </button>
+                    </div>
+
+                  </div>
                 </div>
               </div>
             )}
