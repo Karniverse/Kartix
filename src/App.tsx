@@ -470,7 +470,7 @@ function App() {
             
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
-                v{versionData.version}
+                {versionData.version}
               </div>
               {!updateInfo?.available && (
                 <button 

@@ -643,17 +643,17 @@ fn check_for_updates(current_version: String) -> Result<UpdateInfo, String> {
         }
     }
     
-    let mut latest_version = tag_name.clone();
-    if latest_version.starts_with('v') || latest_version.starts_with('V') {
-        latest_version = latest_version[1..].trim().to_string();
-    }
+    let normalize_version = |v: &str| -> String {
+        v.to_lowercase()
+            .replace("-", "")
+            .replace(" ", "")
+            .replace("v", "")
+    };
     
-    let mut current = current_version.clone();
-    if current.starts_with('v') || current.starts_with('V') {
-        current = current[1..].trim().to_string();
-    }
+    let latest_norm = normalize_version(&tag_name);
+    let current_norm = normalize_version(&current_version);
     
-    let available = !latest_version.is_empty() && latest_version != current && !download_url.is_empty();
+    let available = !latest_norm.is_empty() && latest_norm != current_norm && !download_url.is_empty();
     
     Ok(UpdateInfo {
         available,
