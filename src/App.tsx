@@ -104,6 +104,7 @@ function App() {
 
     const unlistenProgress = listen("job-progress", (event) => {
       const line = event.payload as string;
+      console.log("FFMPEG LOG:", line);
       
       // Check for progress
       if (line.includes("time=")) {
@@ -429,8 +430,9 @@ function App() {
       const sourceBitrate = videoStream?.bit_rate || videoStream?.tags?.BPS || videoStream?.tags?.['BPS-eng'] || mediaInfo.format.bit_rate || 0;
       
       if (sourceBitrate > 0) {
-        // Vague heuristic: Source Bitrate * ((51 - CRF) / 51)
-        const modifier = (51 - crf) / 51;
+        // Vague exponential heuristic: 0.805 ^ CRF
+        // At CQ 5, this is exactly ~34% (matching 50GB -> 17GB).
+        const modifier = Math.pow(0.805, crf);
         let totalKbps = Math.round((Number(sourceBitrate) / 1000) * modifier);
         
         // Add Audio Bitrate to the estimate
@@ -548,7 +550,7 @@ function App() {
         )}
 
         <div style={{ marginTop: 'auto' }}>
-          {jobStatus.startsWith("Processing") || jobStatus.startsWith("Init") || jobStatus === "Starting job..." ? (
+          {jobStatus.startsWith("Processing") || jobStatus.startsWith("Init") || jobStatus.startsWith("Total Progress") || jobStatus === "Starting job..." ? (
             <button className="btn" onClick={handleCancel} style={{ width: '100%', padding: '0.75rem', background: 'var(--danger-color)', color: 'white', border: 'none', cursor: 'pointer' }}>
               🛑 Cancel Job
             </button>
@@ -573,8 +575,18 @@ function App() {
             )}
             
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
-                {versionData.version}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <div style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>
+                  {versionData.version}
+                </div>
+                <button 
+                  className="btn btn-secondary" 
+                  onClick={() => invoke('open_dev_console')} 
+                  style={{ padding: '0.1rem 0.3rem', fontSize: '0.6rem', opacity: 0.7 }}
+                  title="Open Developer Console to view raw logs"
+                >
+                  Console
+                </button>
               </div>
               {!updateInfo?.available && (
                 <button 

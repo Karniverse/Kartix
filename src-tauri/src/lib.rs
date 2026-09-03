@@ -574,6 +574,13 @@ fn check_file_exists(path: String) -> bool {
 }
 
 #[tauri::command]
+fn open_dev_console(window: tauri::WebviewWindow) {
+    if !window.is_devtools_open() {
+        window.open_devtools();
+    }
+}
+
+#[tauri::command]
 async fn get_encoders() -> Result<Vec<String>, String> {
     let output = Command::new("ffmpeg")
         .args(["-encoders"])
@@ -702,10 +709,11 @@ pub fn run() {
             analyze_file, 
             start_job, 
             get_encoders, 
-            check_file_exists, 
-            cancel_job,
+            cancel_job, 
+            check_file_exists,
             check_for_updates,
-            download_and_install_update
+            download_and_install_update,
+            open_dev_console
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
