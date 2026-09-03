@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { openPath } from '@tauri-apps/plugin-opener';
@@ -42,6 +42,17 @@ function App() {
   const [trimStart, setTrimStart] = useState("");
   const [trimEnd, setTrimEnd] = useState("");
   const [playhead, setPlayhead] = useState(0);
+
+  // Refs for event listener to access latest state
+  const mediaInfoRef = useRef<any>(null);
+  const trimStartRef = useRef("");
+  const trimEndRef = useRef("");
+
+  useEffect(() => {
+    mediaInfoRef.current = mediaInfo;
+    trimStartRef.current = trimStart;
+    trimEndRef.current = trimEnd;
+  }, [mediaInfo, trimStart, trimEnd]);
 
   // Video Advanced State
   const [videoResolution, setVideoResolution] = useState("Original");
@@ -96,12 +107,43 @@ function App() {
       
       // Check for progress
       if (line.includes("time=")) {
-        const timeMatch = line.match(/time=(\d{2}:\d{2}:\d{2}.\d{2})/);
+        const timeMatch = line.match(/time=(\d{2}):(\d{2}):(\d{2}.\d{2})/);
         const fpsMatch = line.match(/fps=\s*([\d.]+)/);
         const speedMatch = line.match(/speed=\s*([\d.]+)x/);
         
         let status = "Processing...";
-        if (timeMatch) status += ` Time: ${timeMatch[1]}`;
+        
+        if (timeMatch) {
+          const h = parseFloat(timeMatch[1]);
+          const m = parseFloat(timeMatch[2]);
+          const s = parseFloat(timeMatch[3]);
+          const currentSeconds = h * 3600 + m * 60 + s;
+
+          let totalSeconds = mediaInfoRef.current?.format?.duration ? parseFloat(mediaInfoRef.current.format.duration) : 0;
+          
+          if (trimStartRef.current && trimEndRef.current) {
+            const parseTs = (ts: string) => {
+              const parts = ts.split(':');
+              if (parts.length === 3) {
+                return parseFloat(parts[0])*3600 + parseFloat(parts[1])*60 + parseFloat(parts[2]);
+              }
+              return 0;
+            };
+            const startSec = parseTs(trimStartRef.current);
+            const endSec = parseTs(trimEndRef.current);
+            if (endSec > startSec) {
+              totalSeconds = endSec - startSec;
+            }
+          }
+
+          if (totalSeconds > 0) {
+            const percent = Math.min((currentSeconds / totalSeconds) * 100, 100).toFixed(3);
+            status = `Total Progress ${percent}% | Processing... Time: ${timeMatch[0].replace('time=', '')}`;
+          } else {
+            status = `Processing... Time: ${timeMatch[0].replace('time=', '')}`;
+          }
+        }
+        
         if (fpsMatch) status += ` | FPS: ${fpsMatch[1]}`;
         if (speedMatch) status += ` | Speed: ${speedMatch[1]}x`;
         
@@ -350,6 +392,68 @@ function App() {
     setAudioConfigs(newConfigs);
   };
 
+  const getEstimates = () => {
+    if (!mediaInfo) return null;
+    
+    // Duration
+    let durSec = mediaInfo.format.duration ? parseFloat(mediaInfo.format.duration) : 0;
+    if (trimStart && trimEnd) {
+      const parseTs = (ts: string) => {
+        const parts = ts.split(':');
+        return parts.length === 3 ? parseFloat(parts[0])*3600 + parseFloat(parts[1])*60 + parseFloat(parts[2]) : 0;
+      };
+      const s = parseTs(trimStart);
+      const e = parseTs(trimEnd);
+      if (e > s) durSec = e - s;
+    }
+
+    if (qualityMode === "bitrate") {
+      let totalKbps = parseInt(videoBitrate) || 0;
+      audioConfigs.forEach(ac => {
+        if (ac.enabled && ac.action !== "none") {
+          if (ac.action === "copy") {
+            const stream = mediaInfo.streams.find((s: any) => s.index === ac.input_index);
+            const br = stream?.bit_rate || stream?.tags?.BPS || stream?.tags?.['BPS-eng'] || 0;
+            totalKbps += Math.round(Number(br)/1000);
+          } else {
+            const br = parseInt(ac.bitrate.replace('k', '')) || 192;
+            totalKbps += br;
+          }
+        }
+      });
+      const sizeMb = (totalKbps / 8) * durSec / 1024;
+      return { bitrate: `${totalKbps} kbps`, size: `${sizeMb.toFixed(1)} MB` };
+    } else {
+      // CRF Vague Estimate
+      const videoStream = mediaInfo.streams?.find((s: any) => s.codec_type === 'video');
+      const sourceBitrate = videoStream?.bit_rate || videoStream?.tags?.BPS || videoStream?.tags?.['BPS-eng'] || mediaInfo.format.bit_rate || 0;
+      
+      if (sourceBitrate > 0) {
+        // Vague heuristic: Source Bitrate * ((51 - CRF) / 51)
+        const modifier = (51 - crf) / 51;
+        let totalKbps = Math.round((Number(sourceBitrate) / 1000) * modifier);
+        
+        // Add Audio Bitrate to the estimate
+        audioConfigs.forEach(ac => {
+          if (ac.enabled && ac.action !== "none") {
+            if (ac.action === "copy") {
+              const stream = mediaInfo.streams.find((s: any) => s.index === ac.input_index);
+              const br = stream?.bit_rate || stream?.tags?.BPS || stream?.tags?.['BPS-eng'] || 0;
+              totalKbps += Math.round(Number(br)/1000);
+            } else {
+              const br = parseInt(ac.bitrate.replace('k', '')) || 192;
+              totalKbps += br;
+            }
+          }
+        });
+        
+        const sizeMb = (totalKbps / 8) * durSec / 1024;
+        return { bitrate: `~${totalKbps} kbps (Heuristic)`, size: `~${sizeMb.toFixed(1)} MB (Heuristic)` };
+      }
+      return { bitrate: "Varies (CRF)", size: "Unknown" };
+    }
+  };
+
   return (
     <div className="app-container">
       {/* Sidebar */}
@@ -496,22 +600,43 @@ function App() {
             <h3 style={{ margin: 0 }}>{filePath ? filePath.split('\\').pop()?.split('/').pop() : 'No File Selected'}</h3>
             <p style={{ margin: 0 }}>{mediaInfo ? `${(mediaInfo as any).format.format_long_name}` : 'Select a file to begin'}</p>
           </div>
-          {mediaInfo && (
-            <div style={{ display: 'flex', gap: '1rem' }}>
-              <div style={{ textAlign: 'right' }}>
-                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Duration</span>
-                <div style={{ fontWeight: '500' }}>{Math.round(Number((mediaInfo as any).format.duration) / 60)} min</div>
+          {mediaInfo && (() => {
+            const est = getEstimates();
+            return (
+              <div style={{ display: 'flex', gap: '2rem', alignItems: 'center' }}>
+                <div style={{ display: 'flex', gap: '1rem' }}>
+                  <div style={{ textAlign: 'right' }}>
+                    <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Source Duration</span>
+                    <div style={{ fontWeight: '500' }}>{Math.round(Number((mediaInfo as any).format.duration) / 60)} min</div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Source Size</span>
+                    <div style={{ fontWeight: '500' }}>{(Number((mediaInfo as any).format.size) / (1024*1024)).toFixed(1)} MB</div>
+                  </div>
+                  <div style={{ textAlign: 'right' }}>
+                    <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Source Bitrate</span>
+                    <div style={{ fontWeight: '500' }}>{(mediaInfo as any).format.bit_rate ? `${Math.round(Number((mediaInfo as any).format.bit_rate) / 1000)} kbps` : 'Unknown'}</div>
+                  </div>
+                </div>
+                
+                {est && (
+                  <>
+                    <div style={{ width: '1px', height: '30px', background: 'var(--border-color)' }}></div>
+                    <div style={{ display: 'flex', gap: '1rem' }}>
+                      <div style={{ textAlign: 'right' }}>
+                        <span style={{ fontSize: '0.75rem', color: 'var(--accent-color)' }}>Est. Output Size</span>
+                        <div style={{ fontWeight: '500' }}>{est.size}</div>
+                      </div>
+                      <div style={{ textAlign: 'right' }}>
+                        <span style={{ fontSize: '0.75rem', color: 'var(--accent-color)' }}>Est. Output Bitrate</span>
+                        <div style={{ fontWeight: '500' }}>{est.bitrate}</div>
+                      </div>
+                    </div>
+                  </>
+                )}
               </div>
-              <div style={{ textAlign: 'right' }}>
-                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Size</span>
-                <div style={{ fontWeight: '500' }}>{(Number((mediaInfo as any).format.size) / (1024*1024)).toFixed(1)} MB</div>
-              </div>
-              <div style={{ textAlign: 'right' }}>
-                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Bitrate</span>
-                <div style={{ fontWeight: '500' }}>{(mediaInfo as any).format.bit_rate ? `${Math.round(Number((mediaInfo as any).format.bit_rate) / 1000)} kbps` : 'Unknown'}</div>
-              </div>
-            </div>
-          )}
+            );
+          })()}
         </header>
 
         {/* Media Settings Viewer */}
