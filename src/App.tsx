@@ -48,11 +48,60 @@ function App() {
   const trimStartRef = useRef("");
   const trimEndRef = useRef("");
 
+  // Sound Notification state with localStorage persistence (enabled by default)
+  const [soundNotification, setSoundNotification] = useState<boolean>(() => {
+    const saved = localStorage.getItem("kartix_sound_notification");
+    return saved === null ? true : saved === "true";
+  });
+  const soundNotificationRef = useRef<boolean>(soundNotification);
+
+  const updateSoundNotification = (enabled: boolean) => {
+    setSoundNotification(enabled);
+    soundNotificationRef.current = enabled;
+    localStorage.setItem("kartix_sound_notification", String(enabled));
+  };
+
+  const playCompletionSound = () => {
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      if (ctx.state === "suspended") {
+        ctx.resume();
+      }
+      const now = ctx.currentTime;
+      
+      const playTone = (freq: number, start: number, dur: number) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(freq, start);
+        
+        gain.gain.setValueAtTime(0, start);
+        gain.gain.linearRampToValueAtTime(0.25, start + 0.03);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+        
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        
+        osc.start(start);
+        osc.stop(start + dur);
+      };
+
+      // Crisp, pleasant two-tone completion chime (D5 -> A5)
+      playTone(587.33, now, 0.2);
+      playTone(880, now + 0.15, 0.35);
+    } catch (err) {
+      console.error("Failed to play notification chime:", err);
+    }
+  };
+
   useEffect(() => {
     mediaInfoRef.current = mediaInfo;
     trimStartRef.current = trimStart;
     trimEndRef.current = trimEnd;
-  }, [mediaInfo, trimStart, trimEnd]);
+    soundNotificationRef.current = soundNotification;
+  }, [mediaInfo, trimStart, trimEnd, soundNotification]);
 
   // Video Advanced State
   const [videoResolution, setVideoResolution] = useState("Original");
@@ -96,6 +145,9 @@ function App() {
 
     const unlistenSuccess = listen("job-success", (event) => {
       setJobStatus(`Job Completed successfully! Saved to: ${event.payload}`);
+      if (soundNotificationRef.current) {
+        playCompletionSound();
+      }
     });
     
     const unlistenError = listen("job-error", (event) => {
@@ -170,6 +222,33 @@ function App() {
     };
   }, []);
 
+  const createAudioConfigFromStream = (s: any, forceAction?: string) => {
+    const lang = s.tags?.language ? s.tags.language.toUpperCase() : "UND";
+    const isCopy = forceAction ? forceAction === "copy" : s.channels === 6;
+    const action = forceAction || (isCopy ? "copy" : s.channels === 2 ? "upmix_dpl2" : "copy");
+    const outCodec = action === "copy" ? (s.codec_name ? s.codec_name.toUpperCase() : "UNKNOWN") : "AAC";
+    const outCh = action === "copy" ? (s.channels === 2 ? "Stereo" : s.channels === 6 ? "5.1" : `${s.channels}ch`) : (s.channels === 2 ? "5.1" : `${s.channels}ch`);
+    const layout = outCh === "5.1" ? "Surround" : s.channels === 2 ? "Stereo" : `${s.channels}ch`;
+    
+    return {
+      input_index: s.index,
+      action: action,
+      codec: "aac",
+      normalize: false,
+      gain: 0,
+      drc: 0,
+      enabled: true,
+      title: `${lang} - ${layout} - ${outCodec} - ${outCh}`,
+      bitrate: "auto",
+      sample_rate: "auto",
+      _channels: s.channels,
+      source_codec: s.codec_name ? s.codec_name.toUpperCase() : "UNKNOWN",
+      source_lang: s.tags?.language ? s.tags.language.toUpperCase() : "",
+      source_bitrate: s.bit_rate || s.tags?.BPS || s.tags?.['BPS-eng'],
+      source_sample_rate: s.sample_rate
+    };
+  };
+
   const handleOpenFile = async () => {
     try {
       const selected = await open({
@@ -200,31 +279,7 @@ function App() {
         if (info && (info as any).streams) {
           const aConfigs = ((info as any).streams as any[])
             .filter((s: any) => s.codec_type === 'audio')
-            .map((s: any) => {
-              const lang = s.tags?.language ? s.tags.language.toUpperCase() : "UND";
-              const isCopy = s.channels === 6;
-              const outCodec = isCopy ? (s.codec_name ? s.codec_name.toUpperCase() : "UNKNOWN") : "AAC";
-              const outCh = isCopy ? "5.1" : (s.channels === 2 ? "5.1" : s.channels);
-              const layout = outCh === "5.1" ? "Surround" : s.channels === 2 ? "Stereo" : `${s.channels}ch`;
-              
-              return {
-                input_index: s.index,
-                action: isCopy ? "copy" : s.channels === 2 ? "upmix_dpl2" : "copy",
-                codec: "aac",
-                normalize: false,
-                gain: 0,
-                drc: 0,
-                enabled: true,
-                title: `${lang} - ${layout} - ${outCodec} - ${outCh}`,
-                bitrate: "auto",
-                sample_rate: "auto",
-                _channels: s.channels,
-                source_codec: s.codec_name ? s.codec_name.toUpperCase() : "UNKNOWN",
-                source_lang: s.tags?.language ? s.tags.language.toUpperCase() : "",
-                source_bitrate: s.bit_rate || s.tags?.BPS || s.tags?.['BPS-eng'],
-                source_sample_rate: s.sample_rate
-              };
-            });
+            .map((s: any) => createAudioConfigFromStream(s));
           setAudioConfigs(aConfigs);
 
           // Initialize subtitle configs based on streams
@@ -393,6 +448,40 @@ function App() {
     const newConfigs = [...audioConfigs];
     newConfigs[index][key] = value;
     setAudioConfigs(newConfigs);
+  };
+
+  const duplicateAudioTrack = (index: number) => {
+    const track = audioConfigs[index];
+    if (!track) return;
+
+    const cloned = { ...track };
+    const lang = track.source_lang || "UND";
+
+    if (track.action === "copy") {
+      cloned.action = track._channels === 2 ? "upmix_dpl2" : "convert";
+      const outCh = track._channels === 2 ? "5.1" : `${track._channels}ch`;
+      cloned.title = `${lang} - Surround - AAC - ${outCh}`;
+    } else {
+      cloned.action = "copy";
+      const chStr = track._channels === 2 ? "Stereo" : track._channels === 6 ? "5.1" : `${track._channels}ch`;
+      cloned.title = `${lang} - ${chStr} - ${track.source_codec} (Copy)`;
+    }
+
+    const nextConfigs = [...audioConfigs];
+    nextConfigs.splice(index + 1, 0, cloned);
+    setAudioConfigs(nextConfigs);
+  };
+
+  const removeAudioTrack = (index: number) => {
+    setAudioConfigs(audioConfigs.filter((_, i) => i !== index));
+  };
+
+  const addAudioTrackFromSource = (streamIndex: number) => {
+    if (!mediaInfo?.streams) return;
+    const stream = mediaInfo.streams.find((s: any) => s.index === streamIndex && s.codec_type === 'audio');
+    if (!stream) return;
+    const newTrack = createAudioConfigFromStream(stream);
+    setAudioConfigs([...audioConfigs, newTrack]);
   };
 
   const getEstimates = () => {
@@ -666,12 +755,61 @@ function App() {
           </div>
 
           <div className="settings-panel">
+            {activeTab === 'audio' && mediaInfo && (
+              <div 
+                style={{ 
+                  gridColumn: '1 / -1', 
+                  display: 'flex', 
+                  justifyContent: 'space-between', 
+                  alignItems: 'center', 
+                  padding: '0.75rem 1rem', 
+                  background: 'rgba(255,255,255,0.03)', 
+                  borderRadius: '8px', 
+                  border: '1px solid var(--border-color)',
+                  flexWrap: 'wrap',
+                  gap: '0.75rem'
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                  <span style={{ fontSize: '0.9rem', fontWeight: 'bold' }}>Audio Tracks</span>
+                  <span style={{ fontSize: '0.75rem', background: 'rgba(255,255,255,0.08)', padding: '0.2rem 0.6rem', borderRadius: '12px', color: 'var(--text-secondary)' }}>
+                    {audioConfigs.filter(t => t.enabled).length} of {audioConfigs.length} enabled
+                  </span>
+                </div>
+                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                  <select 
+                    className="input-field"
+                    style={{ fontSize: '0.8rem', padding: '0.35rem 0.6rem', minWidth: '240px' }}
+                    defaultValue=""
+                    onChange={(e) => {
+                      if (e.target.value !== "") {
+                        addAudioTrackFromSource(Number(e.target.value));
+                        e.target.value = "";
+                      }
+                    }}
+                  >
+                    <option value="" disabled>➕ Add Track from Source...</option>
+                    {((mediaInfo as any).streams || [])
+                      .filter((s: any) => s.codec_type === 'audio')
+                      .map((s: any) => (
+                        <option key={s.index} value={s.index}>
+                          Stream #{s.index}: {s.tags?.language ? s.tags.language.toUpperCase() : 'UND'} {s.codec_name?.toUpperCase()} ({s.channels === 2 ? 'Stereo' : s.channels === 6 ? '5.1' : `${s.channels}ch`})
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              </div>
+            )}
+
             {activeTab === 'audio' && audioConfigs.length > 0 && audioConfigs.map((track, idx) => (
                <div className="settings-card" key={idx}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
-                  <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem', gap: '0.5rem', flexWrap: 'wrap' }}>
+                  <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
+                    <span style={{ fontSize: '0.7rem', background: 'var(--accent-color)', color: 'white', padding: '0.2rem 0.5rem', borderRadius: '4px', fontWeight: 'bold' }}>
+                      TRACK #{idx + 1}
+                    </span>
                     <span style={{ fontSize: '0.7rem', background: 'rgba(255,255,255,0.1)', padding: '0.2rem 0.5rem', borderRadius: '4px', fontWeight: 'bold' }}>
-                      SOURCE: {track.source_codec}
+                      SOURCE #{track.input_index}: {track.source_codec}
                     </span>
                     {track.source_lang && (
                       <span style={{ fontSize: '0.7rem', background: 'rgba(255,255,255,0.1)', padding: '0.2rem 0.5rem', borderRadius: '4px' }}>
@@ -687,16 +825,38 @@ function App() {
                       {track.source_bitrate ? `${Math.round(track.source_bitrate / 1000)} kbps` : 'Unknown kbps'}
                     </span>
                   </div>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                    <input 
-                      type="checkbox" 
-                      checked={track.enabled} 
-                      onChange={(e) => updateAudioConfig(idx, 'enabled', e.target.checked)} 
-                    />
-                    <span style={{ fontSize: '0.875rem', fontWeight: 'bold', color: track.enabled ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
-                      {track.enabled ? 'Enabled' : 'Disabled'}
-                    </span>
-                  </label>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <button 
+                      type="button"
+                      className="btn btn-secondary"
+                      onClick={() => duplicateAudioTrack(idx)}
+                      title="Duplicate this audio track (e.g. to have both converted and original copy)"
+                      style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.25rem', whiteSpace: 'nowrap' }}
+                    >
+                      📄 Duplicate
+                    </button>
+                    {audioConfigs.length > 1 && (
+                      <button 
+                        type="button"
+                        className="btn"
+                        onClick={() => removeAudioTrack(idx)}
+                        title="Remove this audio track"
+                        style={{ padding: '0.25rem 0.5rem', fontSize: '0.75rem', background: 'rgba(231, 76, 60, 0.15)', border: '1px solid rgba(231, 76, 60, 0.4)', color: '#e74c3c', cursor: 'pointer', borderRadius: '4px' }}
+                      >
+                        🗑️
+                      </button>
+                    )}
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', cursor: 'pointer' }}>
+                      <input 
+                        type="checkbox" 
+                        checked={track.enabled} 
+                        onChange={(e) => updateAudioConfig(idx, 'enabled', e.target.checked)} 
+                      />
+                      <span style={{ fontSize: '0.8rem', fontWeight: 'bold', color: track.enabled ? 'var(--text-primary)' : 'var(--text-secondary)' }}>
+                        {track.enabled ? 'Enabled' : 'Disabled'}
+                      </span>
+                    </label>
+                  </div>
                 </div>
                 
                 <div style={{ opacity: track.enabled ? 1 : 0.4, pointerEvents: track.enabled ? 'auto' : 'none', transition: 'all 0.2s' }}>
@@ -1379,7 +1539,38 @@ function App() {
               </div>
             </div>
           )}
-          <h4 style={{ margin: 0, marginBottom: '0.5rem' }}>Job Progress</h4>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+            <h4 style={{ margin: 0 }}>Job Progress</h4>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.85rem', cursor: 'pointer', color: soundNotification ? 'var(--text-primary)' : 'var(--text-secondary)', userSelect: 'none' }}>
+                <input 
+                  type="checkbox" 
+                  checked={soundNotification} 
+                  onChange={(e) => updateSoundNotification(e.target.checked)} 
+                  style={{ cursor: 'pointer' }}
+                />
+                🔔 Sound notification on complete
+              </label>
+              {soundNotification && (
+                <button
+                  type="button"
+                  onClick={playCompletionSound}
+                  title="Test notification sound"
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontSize: '0.85rem',
+                    padding: '0.1rem 0.3rem',
+                    opacity: 0.7,
+                    borderRadius: '4px'
+                  }}
+                >
+                  🔊
+                </button>
+              )}
+            </div>
+          </div>
           <div style={{ flexGrow: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: jobStatus.includes('Error') || jobStatus.includes('Failed') ? 'var(--danger-color)' : jobStatus.includes('success') ? 'var(--success-color)' : 'var(--text-primary)', background: 'rgba(0,0,0,0.2)', borderRadius: '6px', padding: '1rem', fontFamily: 'monospace' }}>
             {jobStatus}
           </div>
