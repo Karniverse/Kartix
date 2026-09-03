@@ -485,7 +485,9 @@ fn start_job(app: AppHandle, request: JobRequest) -> Result<(), String> {
 
         args.push(request.output_path.clone());
 
-        println!("Running ffmpeg with args: {:?}", args);
+        let cmd_str = format!("ffmpeg {}", args.join(" "));
+        println!("Running: {}", cmd_str);
+        let _ = app.emit("job-progress", format!("FFMPEG COMMAND: {}", cmd_str));
 
         let mut child = match Command::new("ffmpeg")
             .args(&args)
@@ -557,11 +559,12 @@ fn start_job(app: AppHandle, request: JobRequest) -> Result<(), String> {
 
 #[tauri::command]
 fn cancel_job(state: tauri::State<JobState>) -> Result<(), String> {
-    if let Some(pid) = *state.0.lock().unwrap() {
+    let pid_opt = *state.0.lock().unwrap();
+    if let Some(pid) = pid_opt {
         #[cfg(target_os = "windows")]
-        let _ = Command::new("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).status();
+        let _ = Command::new("taskkill").args(["/F", "/T", "/PID", &pid.to_string()]).spawn();
         #[cfg(not(target_os = "windows"))]
-        let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+        let _ = Command::new("kill").args(["-9", &pid.to_string()]).spawn();
         
         *state.0.lock().unwrap() = None;
     }

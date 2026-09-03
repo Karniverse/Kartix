@@ -104,7 +104,9 @@ function App() {
 
     const unlistenProgress = listen("job-progress", (event) => {
       const line = event.payload as string;
-      console.log("FFMPEG LOG:", line);
+      if (!line.startsWith("frame=") && !line.startsWith("size=") && line.trim() !== "") {
+        console.log("FFMPEG LOG:", line);
+      }
       
       // Check for progress
       if (line.includes("time=")) {
