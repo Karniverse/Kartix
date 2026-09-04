@@ -136,6 +136,7 @@ fn parse_time(time_str: &str) -> Result<f64, ()> {
 fn start_job(app: AppHandle, request: JobRequest) -> Result<(), String> {
     thread::spawn(move || {
         let mut args = vec![
+            "-nostdin".to_string(),
             "-y".to_string(), // overwrite output
         ];
 
@@ -491,6 +492,7 @@ fn start_job(app: AppHandle, request: JobRequest) -> Result<(), String> {
 
         let mut child = match Command::new("ffmpeg")
             .args(&args)
+            .stdin(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
         {

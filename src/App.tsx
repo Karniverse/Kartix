@@ -192,15 +192,24 @@ function App() {
           }
 
           if (totalSeconds > 0) {
-            const percent = Math.min((currentSeconds / totalSeconds) * 100, 100).toFixed(3);
-            status = `Total Progress ${percent}% | Processing... Time: ${timeMatch[0].replace('time=', '')}`;
+            const rawPercent = (currentSeconds / totalSeconds) * 100;
+            if (rawPercent >= 99.9) {
+              status = `Total Progress 100.000% | Muxing & Finalizing... Writing index to disk (please wait)`;
+            } else {
+              const percent = Math.min(rawPercent, 100).toFixed(3);
+              status = `Total Progress ${percent}% | Processing... Time: ${timeMatch[0].replace('time=', '')}`;
+              if (fpsMatch) status += ` | FPS: ${fpsMatch[1]}`;
+              if (speedMatch) status += ` | Speed: ${speedMatch[1]}x`;
+            }
           } else {
             status = `Processing... Time: ${timeMatch[0].replace('time=', '')}`;
+            if (fpsMatch) status += ` | FPS: ${fpsMatch[1]}`;
+            if (speedMatch) status += ` | Speed: ${speedMatch[1]}x`;
           }
+        } else {
+          if (fpsMatch) status += ` | FPS: ${fpsMatch[1]}`;
+          if (speedMatch) status += ` | Speed: ${speedMatch[1]}x`;
         }
-        
-        if (fpsMatch) status += ` | FPS: ${fpsMatch[1]}`;
-        if (speedMatch) status += ` | Speed: ${speedMatch[1]}x`;
         
         setJobStatus(status);
       } else if (line.toLowerCase().includes("error") || line.toLowerCase().includes("failed") || line.toLowerCase().includes("no capable devices")) {
